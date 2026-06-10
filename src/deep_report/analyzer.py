@@ -66,6 +66,29 @@ class ReportAnalyzer:
         validation = {}
         if self.verify:
             validation = self._validate(kpis_list, code)
+            v_status = validation.get("status", "ok")
+            if v_status == "reject":
+                logger.warning(
+                    "Validation REJECTED: %s — %d checks, %d sign errors, avg deviation %.1f%%",
+                    validation.get("reason"),
+                    validation.get("summary", {}).get("compared_fields", 0),
+                    validation.get("summary", {}).get("sign_errors", 0),
+                    validation.get("summary", {}).get("avg_deviation_pct", 0),
+                )
+                # Return validation-only result (no narrative)
+                return {
+                    "kpis": kpis_list,
+                    "trends": self._build_trend_table(kpis_list),
+                    "narrative": None,
+                    "validation": validation,
+                    "_rejected": True,
+                }
+            elif v_status == "warn":
+                logger.warning(
+                    "Validation WARNING: %s — avg deviation %.1f%%",
+                    validation.get("reason"),
+                    validation.get("summary", {}).get("avg_deviation_pct", 0),
+                )
 
         # Step 5: LLM analysis (Pass 2 — cross-period)
         narrative = self._analyze_multi_period(kpis_list, code, period)
@@ -175,18 +198,58 @@ class ReportAnalyzer:
 
     # ── LLM Pass 1: KPI Extraction ──
 
+    @staticmethod
+    def _sample_key_sections(text: str, max_chars: int) -> str:
+        """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
+        import re as _re
+
+        # Key anchor patterns (ordered by priority)
+        anchors = [
+            ("consolidated statement", "CONSOLIDATED STATEMENTS OF", 3000),
+            ("income statement", "INCOME STATEMENT", 2000),
+            ("balance sheet", "BALANCE SHEET", 2000),
+            ("cash flow", "CASH FLOW", 2000),
+            ("revenue", r"(?i)\b(revenue|total revenues?)\b", 1500),
+            ("profit", r"(?i)\b(gross profit|operating profit|net profit)\b", 1500),
+        ]
+
+        sections = []
+        remaining = set(range(len(text)))
+
+        for _name, pattern, context_size in anchors:
+            if sum(len(s) for s in sections) >= max_chars * 0.8:
+                break
+            for match in _re.finditer(pattern, text, _re.IGNORECASE):
+                start = max(0, match.start() - context_size)
+                end = min(len(text), match.end() + context_size)
+                # Avoid overlap with already-sampled sections
+                section_text = text[start:end]
+                if len(section_text) > 200:
+                    sections.append(f"\n--- Section: {_name} ---\n{section_text}")
+                break  # One sample per anchor type
+
+        if not sections:
+            # Fallback: first 60% + last 40%
+            split = int(max_chars * 0.6)
+            return text[:split] + "\n\n... (truncated) ...\n\n" + text[-max_chars + split:]
+
+        result = "\n".join(sections)
+        if len(result) > max_chars:
+            result = result[:max_chars]
+        logger.info("  Anchor sampling: %d chars from %d sections (original %d chars)",
+                     len(result), len(sections), len(text))
+        return result
+
     def _extract_kpis(self, period: str, text: str, market: str) -> dict | None:
         """LLM 从单份报告中提取关键指标"""
         prompt = self._load_prompt("extract.md")
         if not prompt:
             return None
 
-        # Truncate text if too long (keep ~15KB for extraction)
-        max_chars = 15000
+        # Use anchor-based sampling: locate key sections then truncate
+        max_chars = 30000
         if len(text) > max_chars:
-            # Keep first 60% + last 40%
-            split = int(max_chars * 0.6)
-            text = text[:split] + "\n\n... (truncated) ...\n\n" + text[-max_chars + split:]
+            text = self._sample_key_sections(text, max_chars)
 
         user_prompt = f"{prompt}\n\n---\n\n## 报告周期: {period}\n\n## 报告正文:\n\n{text}"
 
@@ -257,31 +320,182 @@ class ReportAnalyzer:
 
     # ── Validation ──
 
-    def _validate(self, kpis_list: list[dict], code: str) -> dict:
-        """使用 financial-sdk 交叉校验关键字段"""
-        warnings = []
+    # Field mapping: LLM field → financial-sdk attribute path
+    _SDK_FIELD_MAP = {
+        "revenue": ("income_statement", "revenue"),
+        "net_profit": ("income_statement", "net_profit"),
+        "gross_profit": ("income_statement", "gross_profit"),
+        "operating_profit": ("income_statement", "operating_profit"),
+        "total_assets": ("balance_sheet", "total_assets"),
+        "total_equity": ("balance_sheet", "total_equity"),
+        "total_liabilities": ("balance_sheet", "total_liabilities"),
+    }
 
+    # Fields where sign matters (positive = healthy, negative = warning)
+    _SIGN_SENSITIVE = {"net_profit", "operating_profit"}
+
+    def _validate(self, kpis_list: list[dict], code: str) -> dict:
+        """Cross-validate LLM-extracted KPIs against financial-sdk.
+
+        Returns:
+            {status: ok|warn|reject, checks: [...], summary: {...}}
+        """
+        # Load financial-sdk data
+        sdk_data = self._load_sdk_data(code)
+        if not sdk_data:
+            return {"status": "warn", "reason": "financial-sdk_unavailable", "checks": []}
+
+        # Compare each LLM KPI against SDK
+        checks = []
+        total_deviation = 0.0
+        sign_errors = 0
+        compared_fields = 0
+
+        for entry in kpis_list:
+            period = entry.get("_period", "?")
+            kpis = entry.get("kpis", [])
+            for kpi in kpis:
+                if not isinstance(kpi, dict):
+                    continue
+                field = kpi.get("field", "")
+                if field not in self._SDK_FIELD_MAP:
+                    continue
+
+                llm_value = self._parse_numeric(kpi.get("value"))
+                if llm_value is None:
+                    continue
+
+                sdk_value = self._get_sdk_field(sdk_data, field, period)
+                if sdk_value is None:
+                    checks.append({
+                        "field": field, "period": period,
+                        "llm_value": llm_value, "sdk_value": None,
+                        "status": "no_sdk_data",
+                    })
+                    continue
+
+                # Compute deviation
+                abs_sdk = abs(sdk_value)
+                if abs_sdk < 1:
+                    deviation_pct = 100.0 if abs(llm_value - sdk_value) > 10 else 0.0
+                else:
+                    deviation_pct = abs(llm_value - sdk_value) / abs_sdk * 100
+
+                # Sign check
+                sign_flip = (llm_value > 0 and sdk_value < 0) or (llm_value < 0 and sdk_value > 0)
+                if sign_flip and field in self._SIGN_SENSITIVE:
+                    sign_errors += 1
+
+                check = {
+                    "field": field,
+                    "period": period,
+                    "llm_value": llm_value,
+                    "sdk_value": sdk_value,
+                    "deviation_pct": round(deviation_pct, 1),
+                    "sign_flip": sign_flip,
+                    "status": "ok" if deviation_pct < 20 and not sign_flip else "warn" if deviation_pct < 50 else "reject",
+                }
+                checks.append(check)
+                total_deviation += deviation_pct
+                compared_fields += 1
+
+        # Summary
+        if compared_fields == 0:
+            return {"status": "warn", "reason": "no_comparable_fields", "checks": checks}
+
+        avg_deviation = total_deviation / compared_fields
+        reject_count = sum(1 for c in checks if c["status"] == "reject")
+
+        if sign_errors > 0:
+            status = "reject"
+            reason = f"{sign_errors} sign errors detected"
+        elif avg_deviation > 50 or reject_count >= 2:
+            status = "reject"
+            reason = f"avg deviation {avg_deviation:.0f}%, {reject_count} fields rejected"
+        elif avg_deviation > 20:
+            status = "warn"
+            reason = f"avg deviation {avg_deviation:.0f}%"
+        else:
+            status = "ok"
+            reason = f"avg deviation {avg_deviation:.0f}%"
+
+        return {
+            "status": status,
+            "reason": reason,
+            "checks": checks,
+            "summary": {
+                "compared_fields": compared_fields,
+                "avg_deviation_pct": round(avg_deviation, 1),
+                "sign_errors": sign_errors,
+                "reject_count": reject_count,
+            },
+        }
+
+    def _load_sdk_data(self, code: str) -> dict | None:
+        """Load financial-sdk data for a stock."""
         try:
+            import os as _os
             import sys as _sys
-            _sys.path.insert(0, "/root/code/financial-sdk")
-            _sys.path.insert(0, "/root/code/financial-sdk/src")
+            _sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
+            _sys.path.insert(0, _sdk_path)
+            _sys.path.insert(0, f"{_sdk_path}/src")
             from financial_sdk import FinancialFacade
             f = FinancialFacade()
             bundle = f.get_financial_data(code, report_type="all", period="annual")
-            if bundle:
-                income = bundle.income_statement if hasattr(bundle, 'income_statement') else None
-                if income is not None and hasattr(income, '__call__'):
-                    income = income()
-                if income is not None and hasattr(income, 'columns') and len(income.columns) > 0:
-                    warnings.append({"source": "financial-sdk", "status": "ok", "years": list(income.columns)[:3]})
-                else:
-                    warnings.append({"source": "financial-sdk", "status": "no_income_data"})
-            else:
-                warnings.append({"source": "financial-sdk", "status": "no_bundle"})
-        except Exception as e:
-            warnings.append({"source": "financial-sdk", "status": "unavailable", "note": str(e)[:100]})
+            if not bundle:
+                return None
 
-        return {"warnings": warnings}
+            income = getattr(bundle, 'income_statement', None)
+            bs = getattr(bundle, 'balance_sheet', None)
+            cf = getattr(bundle, 'cash_flow', None)
+
+            def _to_dict(obj):
+                if obj is None:
+                    return {}
+                if hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                if hasattr(obj, '__call__'):
+                    obj = obj()
+                if hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                return {}
+
+            return {
+                "income_statement": _to_dict(income),
+                "balance_sheet": _to_dict(bs),
+                "cash_flow": _to_dict(cf),
+            }
+        except Exception as e:
+            logger.warning("Failed to load financial-sdk: %s", e)
+            return None
+
+    @staticmethod
+    def _parse_numeric(value) -> float | None:
+        """Parse a numeric value from LLM output (handles strings, ints, floats)."""
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        try:
+            return float(str(value).replace(",", "").replace(" ", ""))
+        except (ValueError, TypeError):
+            return None
+
+    def _get_sdk_field(self, sdk_data: dict, field: str, period: str) -> float | None:
+        """Get the latest annual value for a field from SDK data."""
+        source_name, attr_name = self._SDK_FIELD_MAP.get(field, (None, None))
+        if not source_name:
+            return None
+        source = sdk_data.get(source_name, {})
+        values = source.get(attr_name, {})
+        if not values:
+            return None
+        if isinstance(values, dict):
+            indices = sorted(values.keys())
+            if indices:
+                val = values[indices[-1]]
+                return float(val) if val is not None else None
+        return None
 
     # ── LLM Pass 2: Cross-Period Analysis ──
 
