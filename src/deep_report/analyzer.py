@@ -547,7 +547,7 @@ class ReportAnalyzer:
 2. 每个模块包含数据表 + 分析解读
 3. 区分一次性项目 vs 主营业务
 4. 指出异常数据点
-5. 风格参考海豚投研——有观点，用数据说话
+5. 风格参考海豚投研——有观点，用数据说话"""
 
         narrative = self._call_llm(
             f"{prompt}\n\n{user_prompt}",
@@ -647,7 +647,7 @@ class ReportAnalyzer:
         return "\n".join(lines)
 
     def _build_trend_table(self, kpis_list: list[dict]) -> list[dict]:
-        """构建数值化趋势表（备用）"""
+        """Build numeric trend table"""
         # Simple trend extraction for key fields
         fields = ["revenue", "net_profit", "gross_margin", "store_count"]
         trends = []
