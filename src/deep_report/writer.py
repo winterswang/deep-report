@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import logging
-import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("deep_report.writer")
@@ -39,24 +38,11 @@ class ReportWriter:
         md_path.write_text(markdown, encoding="utf-8")
         logger.info("Markdown saved to %s", md_path)
 
-        # Try feishu_create_doc via openclaw gateway
-        try:
-            result = subprocess.run(
-                ["openclaw", "tool", "feishu_create_doc",
-                 "--title", title,
-                 "--markdown", markdown],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode == 0:
-                # Parse doc URL from output
-                for line in result.stdout.split("\n"):
-                    if "feishu.cn" in line:
-                        return line.strip()
-            logger.info("openclaw tool output: %s", result.stdout[:200])
-        except FileNotFoundError:
-            logger.info("openclaw CLI not available")
-        except Exception as e:
-            logger.warning("feishu_create_doc failed: %s", e)
+        # Write a marker file so the calling OpenClaw agent can pick up
+        # and push to feishu via the feishu_create_doc tool.
+        marker = out_dir / f"{safe_name}.ready"
+        marker.write_text(str(md_path), encoding="utf-8")
+        logger.info("Marker written to %s — ready for feishu upload", marker)
 
         return str(md_path)
 

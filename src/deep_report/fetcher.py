@@ -3,6 +3,7 @@
 from __future__ import annotations
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -13,8 +14,8 @@ logger = logging.getLogger("deep_report.fetcher")
 DOWNLOADS_BASE = Path("/root/code/unified-downloader/downloads")
 
 # Market detection (simple heuristic, refine later)
-A_SH_RE = __import__("re").compile(r"^\d{6}\.(SZ|SH)$")
-HK_RE = __import__("re").compile(r"^\d{4,5}\.HK$")
+A_SH_RE = re.compile(r"^\d{6}\.(SZ|SH)$")
+HK_RE = re.compile(r"^\d{4,5}\.HK$")
 
 
 class ReportFetcher:
@@ -104,21 +105,12 @@ class ReportFetcher:
                 cmd, capture_output=True, text=True, timeout=120,
             )
             if result.returncode == 0:
-                # Parse output for file path
-                for line in result.stdout.split("\n"):
-                    if "文件:" in line or "保存到:" in line or "file_path" in line:
-                        pass
-                    elif "downloads/" in line and (".pdf" in line or ".html" in line):
-                        path = line.strip().split()[-1]
-                        full = DOWNLOADS_BASE.parent / path
-                        if full.exists():
-                            logger.info("  → %s", full)
-                            return str(full)
-                # Fallback: find the downloaded file
+                # Find the downloaded file (unified-downloader handles naming)
                 found = self._find_existing(code, year, dl_type, market)
                 if found:
+                    logger.info("  → %s", found)
                     return found
-                logger.warning("  Download appeared to succeed but can't find file")
+                logger.warning("  Download succeeded but cannot locate file for %s %d %s", code, year, dl_type)
             else:
                 logger.warning("  Download failed: %s", result.stderr[:200])
                 return None
@@ -196,7 +188,11 @@ class ReportFetcher:
 
     def _prev_period(self, year: int, freq: str, offset: int) -> tuple[int, str]:
         """计算 offset 个周期前的 (year, freq)"""
-        period_map = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 4}
+        # FY 按年回退，季度按季度回退
+        if freq == "FY":
+            return year - offset, "FY"
+
+        period_map = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}
         current_idx = period_map.get(freq, 4)
         total_months = current_idx * 3 - offset * 3
         new_year = year

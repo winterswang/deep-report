@@ -230,6 +230,12 @@ class ReportAnalyzer:
             "net_new_stores": ["net_new_stores", "净增门店", "净增", "净开店"],
             "domestic_sssg": ["domestic_sssg", "国内同店", "国内同店增速"],
             "overseas_sssg": ["overseas_sssg", "海外同店", "海外同店增速"],
+            "ebitda": ["ebitda", "EBITDA", "息税折旧摊销前利润"],
+            "roe": ["roe", "ROE", "净资产收益率"],
+            "free_cash_flow": ["free_cash_flow", "自由现金流", "FCF", "fcf"],
+            "debt_ratio": ["debt_ratio", "资产负债率", "负债率"],
+            "r_and_d_expense": ["r_and_d_expense", "研发费用", "研发支出"],
+            "eps": ["eps", "EPS", "每股收益", "基本每股收益", "稀释每股收益"],
         }
 
         for entry in kpis_list:
@@ -358,9 +364,10 @@ class ReportAnalyzer:
     def _call_llm(self, user_prompt: str, max_tokens: int = 4000) -> str | None:
         """调用 LLM（复用 morning-brief 的 LLM client）"""
         try:
-            import sys
-            sys.path.insert(0, "/root/code/morning-brief/.venv/lib/python3.12/site-packages")
-            sys.path.insert(0, "/root/code/morning-brief")
+            import os as _os
+            import sys as _sys
+            _mb_path = _os.environ.get("MORNING_BRIEF_PATH", "/root/code/morning-brief")
+            _sys.path.insert(0, _mb_path)
 
             from src.utils.config import (
                 get_ark_api_key, get_deepseek_api_key,
@@ -420,6 +427,7 @@ class ReportAnalyzer:
     @staticmethod
     def _clean_llm_response(text: str) -> str:
         """Strip conversational prefixes/suffixes from LLM output"""
+        # Prefixes
         prefixes = [
             "好的，收到。", "好的，", "收到。", "明白了。", "没问题。",
             "OK，", "Okay，", "好的, ", "收到, ",
@@ -427,5 +435,17 @@ class ReportAnalyzer:
         for p in prefixes:
             if text.startswith(p):
                 text = text[len(p):].lstrip()
+                break
+        # Suffixes
+        suffixes = [
+            "希望对你有帮助。", "希望对您有帮助。", "希望以上分析对你有帮助。",
+            "以上是分析报告。", "以上是完整的分析报告。",
+            "如果有需要调整的地方请告诉我。", "如果有问题请随时指出。",
+            "\n---\n\n以上是", "\n---\n以上是",
+            "（以上内容由AI生成，不构成投资建议）",
+        ]
+        for s in suffixes:
+            if text.rstrip().endswith(s):
+                text = text.rstrip()[: -len(s)].rstrip()
                 break
         return text
