@@ -528,8 +528,14 @@ class ReportAnalyzer:
         # Format KPIs as text for LLM consumption
         kpi_text = self._format_kpis_for_llm(kpis_list)
 
+        # Build credibility table from guidance vs actuals
+        credibility = self._build_credibility_table(kpis_list)
+
         user_prompt = f"""## 股票: {code}
 ## 当前分析周期: {current_period}
+
+{credibility}
+
 ## 历史KPI数据:
 
 {kpi_text}
@@ -541,7 +547,7 @@ class ReportAnalyzer:
 2. 每个模块包含数据表 + 分析解读
 3. 区分一次性项目 vs 主营业务
 4. 指出异常数据点
-5. 风格参考海豚投研——有观点，用数据说话"""
+5. 风格参考海豚投研——有观点，用数据说话
 
         narrative = self._call_llm(
             f"{prompt}\n\n{user_prompt}",
@@ -660,6 +666,70 @@ class ReportAnalyzer:
             if values:
                 trends.append({"field": field, "values": values})
         return trends
+
+    @staticmethod
+    def _build_credibility_table(kpis_list: list[dict]) -> str:
+        """Build a guidance-vs-actual credibility tracking table.
+
+        Matches each period's management_guidance.revenue_outlook against
+        the next period's actual revenue, producing a structured markdown
+        table for the LLM to reference in the V展望 analysis.
+        """
+        # Sort by period: Q1<Q2<Q3<Q4<FY within same year, ascending
+        def _period_key(entry):
+            p = entry.get("_period", "")
+            freq_order = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
+            try:
+                y = int(p[:4])
+                f = p[4:].upper()
+                return (y, freq_order.get(f, 0))
+            except (ValueError, IndexError):
+                return (0, 0)
+
+        sorted_kpis = sorted(kpis_list, key=_period_key)
+
+        if len(sorted_kpis) < 2:
+            return ""
+
+        # Extract actual revenue from each period
+        def _get_revenue(entry):
+            for kpi in entry.get("kpis", []):
+                if kpi.get("field") == "revenue":
+                    val = kpi.get("value")
+                    unit = kpi.get("unit", "")
+                    if val is not None:
+                        try:
+                            return float(val), unit
+                        except (ValueError, TypeError):
+                            return None, ""
+            return None, ""
+
+        rows = []
+        for i in range(len(sorted_kpis) - 1):
+            guidance = sorted_kpis[i].get("management_guidance")
+            if not guidance:
+                continue
+            outlook = guidance.get("revenue_outlook", "")
+            if not outlook:
+                continue
+
+            actual_val, unit = _get_revenue(sorted_kpis[i + 1])
+            if actual_val is None:
+                continue
+
+            period_from = sorted_kpis[i].get("_period", "?")
+            period_to = sorted_kpis[i + 1].get("_period", "?")
+            rows.append(f"| {period_from} | {outlook} | {period_to} | {actual_val}{unit} |")
+
+        if not rows:
+            return ""
+
+        header = (
+            "## 管理层可信度追踪（指引 vs 实际）\n\n"
+            "| 指引来源季 | 管理层展望 | 实际季度 | 实际收入 |\n"
+            "|-----------|-----------|---------|--------|\n"
+        )
+        return header + "\n".join(rows) + "\n"
 
     # ── LLM Client ──
 
