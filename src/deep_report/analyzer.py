@@ -552,11 +552,79 @@ class ReportAnalyzer:
         return narrative
 
     def _format_kpis_for_llm(self, kpis_list: list[dict]) -> str:
-        """将 KPI 列表格式化为 LLM 友好的文本"""
+        """将 KPI 列表 + 业务模型数据格式化为 LLM 友好的文本"""
         lines = []
         for entry in kpis_list:
             period = entry.get("_period", "?")
             lines.append(f"\n### {period}")
+
+            # Business model data (new)
+            bm = entry.get("business_model")
+            if bm:
+                lines.append("\n**业务模型数据**:")
+                segments = bm.get("segments", [])
+                if segments:
+                    lines.append("  分部收入:")
+                    for seg in segments:
+                        lines.append(f"    - {seg.get('name','?')}: 收入{seg.get('revenue','?')}{seg.get('revenue_unit','')} "
+                                     f"({seg.get('revenue_yoy','')}), 占比{seg.get('revenue_share_pct','?')}%, "
+                                     f"毛利率{seg.get('gross_margin','?')}%")
+                unit_econ = bm.get("unit_economics", [])
+                if unit_econ:
+                    lines.append("  单位经济:")
+                    for ue in unit_econ:
+                        lines.append(f"    - {ue.get('name','?')}: {ue.get('value','?')}{ue.get('unit','')} "
+                                     f"(同比{ue.get('yoy','?')})")
+                rev_mix = bm.get("revenue_mix")
+                if rev_mix:
+                    mix_parts = [f"{k}: {v}%" for k, v in rev_mix.items() if v]
+                    if mix_parts:
+                        lines.append(f"  收入结构: {', '.join(mix_parts)}")
+                moat = bm.get("moat_signals", [])
+                if moat:
+                    lines.append("  护城河信号:")
+                    for m in moat:
+                        lines.append(f"    - {m.get('name','?')}: {m.get('value','?')}{m.get('unit','')}")
+
+            # One-time items (new)
+            one_time = entry.get("one_time_items")
+            if one_time:
+                lines.append("\n**一次性/非经常性项目**:")
+                total_one_time = 0
+                for item in one_time:
+                    val = item.get("value", 0) or 0
+                    lines.append(f"    - {item.get('name','?')}: {val}{item.get('unit','')} "
+                                 f"[{item.get('nature','?')}] — {item.get('description','?')}")
+                    total_one_time += val
+                lines.append(f"  一次性项目合计: {total_one_time}{one_time[0].get('unit','') if one_time else ''}")
+
+            # Cash flow quality (new)
+            cfq = entry.get("cash_flow_quality")
+            if cfq:
+                lines.append(f"\n**现金流质量**:")
+                lines.append(f"    经营现金流: {cfq.get('operating_cash_flow','?')}{cfq.get('ocf_unit','')}")
+                ocf_ratio = cfq.get("net_profit_match", {}).get("ocf_to_net_profit_ratio")
+                if ocf_ratio:
+                    lines.append(f"    OCF/净利润比值: {ocf_ratio} ({cfq.get('net_profit_match',{}).get('assessment','?')})")
+                lines.append(f"    自由现金流: {cfq.get('free_cash_flow','?')}{cfq.get('fcf_unit','')}")
+                lines.append(f"    资本开支: {cfq.get('capex','?')}{cfq.get('capex_unit','')}")
+
+            # Management guidance (new)
+            guidance = entry.get("management_guidance")
+            if guidance:
+                lines.append(f"\n**管理层指引**:")
+                lines.append(f"    收入展望: {guidance.get('revenue_outlook','?')}")
+                margin = guidance.get('margin_outlook')
+                if margin:
+                    lines.append(f"    利润展望: {margin}")
+                initiatives = guidance.get('key_initiatives', [])
+                if initiatives:
+                    lines.append(f"    战略重点: {', '.join(initiatives)}")
+                risks = guidance.get('risk_mentions', [])
+                if risks:
+                    lines.append(f"    提及风险: {', '.join(risks)}")
+
+            # KPIs
             kpis = entry.get("kpis", [])
             for kpi in kpis:
                 field = kpi.get("field", kpi.get("name", "?"))
