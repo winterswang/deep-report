@@ -201,7 +201,6 @@ class ReportAnalyzer:
     @staticmethod
     def _sample_key_sections(text: str, max_chars: int) -> str:
         """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
-        import re as _re
 
         # Key anchor patterns (ordered by priority)
         anchors = [
@@ -214,12 +213,11 @@ class ReportAnalyzer:
         ]
 
         sections = []
-        remaining = set(range(len(text)))
 
         for _name, pattern, context_size in anchors:
             if sum(len(s) for s in sections) >= max_chars * 0.8:
                 break
-            for match in _re.finditer(pattern, text, _re.IGNORECASE):
+            for match in re.finditer(pattern, text, re.IGNORECASE):
                 start = max(0, match.start() - context_size)
                 end = min(len(text), match.end() + context_size)
                 # Avoid overlap with already-sampled sections

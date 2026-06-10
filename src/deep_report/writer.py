@@ -30,7 +30,7 @@ class ReportWriter:
 
         if rejected or not narrative:
             # Build diagnostic-only output
-            markdown = self._build_diagnostic(title, code, period, result, validation)
+            markdown = self._build_diagnostic(title, code, period, validation)
         else:
             markdown = self._build_markdown(title, code, period, narrative, validation)
 
@@ -88,7 +88,7 @@ class ReportWriter:
 
     def _build_diagnostic(
         self, title: str, code: str, period: str,
-        result: dict, validation: dict,
+        validation: dict,
     ) -> str:
         """Build diagnostic output when validation rejects or no narrative."""
         checks = validation.get("checks", [])
