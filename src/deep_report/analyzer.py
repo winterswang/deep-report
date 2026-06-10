@@ -251,7 +251,7 @@ class ReportAnalyzer:
 
         user_prompt = f"{prompt}\n\n---\n\n## 报告周期: {period}\n\n## 报告正文:\n\n{text}"
 
-        result = self._call_llm(user_prompt, max_tokens=4000)
+        result = self._call_llm(user_prompt, max_tokens=8000)
 
         if not result:
             return None
@@ -362,6 +362,10 @@ class ReportAnalyzer:
                 llm_value = self._parse_numeric(kpi.get("value"))
                 if llm_value is None:
                     continue
+
+                # Normalize LLM unit to base (元) for comparison
+                llm_unit = kpi.get("unit", "")
+                llm_value = self._normalize_unit(llm_value, llm_unit)
 
                 sdk_value = self._get_sdk_field(sdk_data, field, period)
                 if sdk_value is None:
@@ -478,6 +482,24 @@ class ReportAnalyzer:
             return float(str(value).replace(",", "").replace(" ", ""))
         except (ValueError, TypeError):
             return None
+
+    # Unit multiplier to base unit (元)
+    _UNIT_MULTIPLIER = {
+        "元": 1, "rmb": 1, "cny": 1,
+        "千元": 1_000, "thousands": 1_000,
+        "万元": 10_000,
+        "百万元": 1_000_000, "millions": 1_000_000,
+        "亿元": 100_000_000, "亿": 100_000_000,
+    }
+
+    @classmethod
+    def _normalize_unit(cls, value: float, unit: str | None) -> float:
+        """Convert a value in given unit to base unit (元)."""
+        if not unit:
+            return value
+        unit_lower = unit.lower().replace(" ", "").replace("人民币", "")
+        multiplier = cls._UNIT_MULTIPLIER.get(unit_lower, 1)
+        return value * multiplier
 
     def _get_sdk_field(self, sdk_data: dict, field: str, period: str) -> float | None:
         """Get the latest annual value for a field from SDK data."""

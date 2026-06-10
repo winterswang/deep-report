@@ -140,7 +140,7 @@ class ReportFetcher:
         # Prefer exact type match, then any match
         dl_type_clean = dl_type.replace("-", "").replace("_", "").upper()
         for f in candidates:
-            if dl_type_clean in f.name.upper():
+            if dl_type_clean in f.name.upper().replace("_", ""):
                 return str(f)
 
         # FPI fallback: 10q→6K, 10k→20F
