@@ -164,16 +164,15 @@ class ReportAnalyzer:
             tag.decompose()
 
         # Strip XBRL namespace tags (ix:nonFraction, ix:nonNumeric etc.) — keep text, drop tags
-        import re as _re
-        for tag in soup.find_all(_re.compile(r'ix:')):
+        for tag in soup.find_all(re.compile(r'ix:')):
             tag.unwrap()
         # Remove linkbase/reference/schema sections entirely
-        for tag in soup.find_all(_re.compile(r'link:')):
+        for tag in soup.find_all(re.compile(r'link:')):
             tag.decompose()
-        for tag in soup.find_all(_re.compile(r'xbrl[i]?:')):
+        for tag in soup.find_all(re.compile(r'xbrl[i]?:')):
             tag.decompose()
         # Remove hidden/non-printing elements
-        for tag in soup.find_all(attrs={"style": _re.compile(r'display\s*:\s*none', _re.IGNORECASE)}):
+        for tag in soup.find_all(attrs={"style": re.compile(r'display\s*:\s*none', re.IGNORECASE)}):
             tag.decompose()
 
         parts = []
@@ -225,15 +224,16 @@ class ReportAnalyzer:
     def _sample_key_sections(text: str, max_chars: int, market: str = "") -> str:
         """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
 
-        # Key anchor patterns (ordered by priority) — bilingual
-        anchors = [
-            # Chinese anchors (A-share / HK)
+        # Chinese anchors (A-share / HK)
+        _CN_ANCHORS = [
             ("利润表", r"(?:利润表|合并利润表|综合收益表)", 2000),
             ("资产负债表", r"(?:资产负债表|合并资产负债表)", 2000),
             ("现金流量表", r"(?:现金流量表|合并现金流量表)", 2000),
             ("营业收入", r"(?:营业收入|总收入|营收)", 1500),
             ("毛利率", r"(?:毛利率|毛利)", 1500),
-            # English anchors (US filings)
+        ]
+        # English anchors (US filings)
+        _EN_ANCHORS = [
             ("income_statement", r"(?i)(?:consolidated\s+statements?\s+of\s+income|income\s+statement)", 2000),
             ("balance_sheet", r"(?i)(?:consolidated\s+balance\s+sheets?|balance\s+sheet)", 2000),
             ("cash_flow", r"(?i)(?:consolidated\s+statements?\s+of\s+cash\s+flows?|cash\s+flow)", 2000),
@@ -243,6 +243,9 @@ class ReportAnalyzer:
             ("operating_income", r"(?i)(?:[Oo]perating\s+[Ii]ncome|[Ii]ncome\s+from\s+[Oo]perations)\s*\$", 1500),
             ("net_income", r"(?i)(?:[Nn]et\s+[Ii]ncome|[Nn]et\s+[Ee]arnings)\s*\$", 1500),
         ]
+        # Select anchors by market to avoid useless cross-language scans
+        is_cn = market in ("CN", "HK")
+        anchors = _CN_ANCHORS + _EN_ANCHORS if not is_cn else _CN_ANCHORS
 
         sections = []
         seen_ranges = set()  # Track (start,end) to avoid overlaps
