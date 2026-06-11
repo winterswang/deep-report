@@ -360,3 +360,73 @@
 
 ## TODO
 - 检查飞书卡片模板源码，修复 title/icon 字段配置问题，使 Feishu 推送恢复正常
+
+---
+## 2026-06-10
+
+## FEATURE
+
+- **deep-report** 新增数据校验层（data validation layer），提升报告质量
+
+## BUGFIX
+
+- **deep-report** Code Review 修复：解决 2 个红色（严重问题）+ 6 个黄色（警告）+ 3 个绿色（轻微）问题
+
+## DISCUSS
+
+- (none)
+
+## DECISION
+
+- (none)
+
+## TODO
+
+- (none)
+
+---
+## 2026-06-10
+
+## FEATURE
+
+- deep-report：新增数据校验层（`/validators/` 或类似模块）
+- 海豚投研：52 篇研报 → 提炼分析框架（知识资产沉淀）
+- Skills 全量 Review：完成 7 个 skill 的 Review
+
+## BUGFIX
+
+- deep-report Code Review 修复：2 个🔴 严重 + 6 个🟡 警告 + 3 个🟢 建议
+- Cron 优化：修复执行报错
+
+## DISCUSS
+
+- (不适用：对话内容为 cron 管线自动输出的日报总结，无实际技术讨论)
+
+## DECISION
+
+- (none)
+
+## TODO
+
+- (none)
+
+---
+## 2026-06-10
+
+## FEATURE
+- deep-report 新增数据校验层（data validation layer）
+- 海豚投研蒸馏完成：从 52 篇提炼出分析框架（analysis framework）
+- Skills 全量 Review 完成：7 个 skill 完成 review
+
+## BUGFIX
+- deep-report Code Review 修复（2🔴 + 6🟡 + 3🟢）
+- Cron 管线报错修复
+
+## DISCUSS
+- (none)
+
+## DECISION
+- (none)
+
+## TODO
+- (none)

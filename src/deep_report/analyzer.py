@@ -129,16 +129,24 @@ class ReportAnalyzer:
         parts = []
         with pdfplumber.open(path) as pdf:
             for i, page in enumerate(pdf.pages):
-                text = page.extract_text()
-                if text:
-                    parts.append(f"=== 第{i+1}页 ===\n{text}")
+                try:
+                    text = page.extract_text()
+                    if text:
+                        parts.append(f"=== 第{i+1}页 ===\n{text}")
+                except Exception:
+                    pass  # Skip unextractable pages
 
                 # Extract tables as markdown
-                tables = page.extract_tables()
-                for j, table in enumerate(tables):
-                    if table and len(table) > 1:
-                        md = self._table_to_markdown(table)
-                        parts.append(f"【表格 {j+1}】\n{md}")
+                try:
+                    tables = page.extract_tables()
+                    for j, table in enumerate(tables):
+                        if table and len(table) > 1:
+                            # Normalize None cells to empty strings
+                            clean = [[c or "" for c in row] for row in table]
+                            md = self._table_to_markdown(clean)
+                            parts.append(f"【表格 {j+1}】\n{md}")
+                except Exception:
+                    pass  # Skip problematic tables
 
         full_text = "\n\n".join(parts)
         logger.info("  PDF %s: %d chars, %d pages", path.name, len(full_text), len(pdf.pages))
@@ -151,8 +159,20 @@ class ReportAnalyzer:
 
         soup = BeautifulSoup(html, "html.parser")
 
-        # Remove script/style
-        for tag in soup(["script", "style", "meta", "link"]):
+        # Remove script/style/structural
+        for tag in soup(["script", "style", "meta", "link", "title"]):
+            tag.decompose()
+
+        # Strip XBRL namespace tags (ix:nonFraction, ix:nonNumeric etc.) — keep text, drop tags
+        for tag in soup.find_all(re.compile(r'ix:')):
+            tag.unwrap()
+        # Remove linkbase/reference/schema sections entirely
+        for tag in soup.find_all(re.compile(r'link:')):
+            tag.decompose()
+        for tag in soup.find_all(re.compile(r'xbrl[i]?:')):
+            tag.decompose()
+        # Remove hidden/non-printing elements
+        for tag in soup.find_all(attrs={"style": re.compile(r'display\s*:\s*none', re.IGNORECASE)}):
             tag.decompose()
 
         parts = []
@@ -186,9 +206,11 @@ class ReportAnalyzer:
         """将表格行列表转为 Markdown 表格"""
         if not rows:
             return ""
-        col_count = max(len(r) for r in rows)
+        # Normalize None → "" for safe join
+        safe_rows = [[str(c) if c is not None else "" for c in row] for row in rows]
+        col_count = max(len(r) for r in safe_rows)
         # Pad rows
-        padded = [r + [""] * (col_count - len(r)) for r in rows]
+        padded = [r + [""] * (col_count - len(r)) for r in safe_rows]
         lines = []
         lines.append("| " + " | ".join(padded[0]) + " |")
         lines.append("|" + "|".join(["---"] * col_count) + "|")
@@ -199,32 +221,54 @@ class ReportAnalyzer:
     # ── LLM Pass 1: KPI Extraction ──
 
     @staticmethod
-    def _sample_key_sections(text: str, max_chars: int) -> str:
+    def _sample_key_sections(text: str, max_chars: int, market: str = "") -> str:
         """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
 
-        # Key anchor patterns (ordered by priority)
-        anchors = [
-            ("consolidated statement", "CONSOLIDATED STATEMENTS OF", 3000),
-            ("income statement", "INCOME STATEMENT", 2000),
-            ("balance sheet", "BALANCE SHEET", 2000),
-            ("cash flow", "CASH FLOW", 2000),
-            ("revenue", r"(?i)\b(revenue|total revenues?)\b", 1500),
-            ("profit", r"(?i)\b(gross profit|operating profit|net profit)\b", 1500),
+        # Chinese anchors (A-share / HK)
+        _CN_ANCHORS = [
+            ("利润表", r"(?:利润表|合并利润表|综合收益表)", 2000),
+            ("资产负债表", r"(?:资产负债表|合并资产负债表)", 2000),
+            ("现金流量表", r"(?:现金流量表|合并现金流量表)", 2000),
+            ("营业收入", r"(?:营业收入|总收入|营收)", 1500),
+            ("毛利率", r"(?:毛利率|毛利)", 1500),
         ]
+        # English anchors (US filings)
+        _EN_ANCHORS = [
+            ("income_statement", r"(?i)(?:consolidated\s+statements?\s+of\s+income|income\s+statement)", 2000),
+            ("balance_sheet", r"(?i)(?:consolidated\s+balance\s+sheets?|balance\s+sheet)", 2000),
+            ("cash_flow", r"(?i)(?:consolidated\s+statements?\s+of\s+cash\s+flows?|cash\s+flow)", 2000),
+            ("total_revenue", r"(?i)(?:^(?:Total\s+)?[Rr]evenue\s*\$)", 1500),
+            ("gross_profit", r"(?i)(?:^(?:Gross\s+[Pp]rofit|Cost\s+of\s+[Rr]evenue)\s*\$)", 1500),
+            ("mda", r"(?i)(?:[Mm]anagement'?s?\s+[Dd]iscussion|[Rr]esults?\s+of\s+[Oo]perations|[Ff]inancial\s+[Cc]ondition)", 3000),
+            ("operating_income", r"(?i)(?:[Oo]perating\s+[Ii]ncome|[Ii]ncome\s+from\s+[Oo]perations)\s*\$", 1500),
+            ("net_income", r"(?i)(?:[Nn]et\s+[Ii]ncome|[Nn]et\s+[Ee]arnings)\s*\$", 1500),
+        ]
+        # Select anchors by market to avoid useless cross-language scans
+        is_cn = market in ("CN", "HK")
+        anchors = _CN_ANCHORS + _EN_ANCHORS if not is_cn else _CN_ANCHORS
 
         sections = []
+        seen_ranges = set()  # Track (start,end) to avoid overlaps
 
         for _name, pattern, context_size in anchors:
             if sum(len(s) for s in sections) >= max_chars * 0.8:
                 break
+            matched = 0
             for match in re.finditer(pattern, text, re.IGNORECASE):
+                if matched >= 3:
+                    break
                 start = max(0, match.start() - context_size)
                 end = min(len(text), match.end() + context_size)
-                # Avoid overlap with already-sampled sections
                 section_text = text[start:end]
-                if len(section_text) > 200:
-                    sections.append(f"\n--- Section: {_name} ---\n{section_text}")
-                break  # One sample per anchor type
+                # Skip overlapped sections (>50% overlap with existing)
+                overlaps = any(
+                    max(start, s) < min(end, e) and (min(end, e) - max(start, s)) > (end - start) * 0.5
+                    for s, e in seen_ranges
+                )
+                if len(section_text) > 200 and not overlaps:
+                    seen_ranges.add((start, end))
+                    sections.append(f"\n--- Section: {_name}[{matched+1}] ---\n{section_text}")
+                    matched += 1
 
         if not sections:
             # Fallback: first 60% + last 40%
@@ -247,7 +291,7 @@ class ReportAnalyzer:
         # Use anchor-based sampling: locate key sections then truncate
         max_chars = 30000
         if len(text) > max_chars:
-            text = self._sample_key_sections(text, max_chars)
+            text = self._sample_key_sections(text, max_chars, market)
 
         user_prompt = f"{prompt}\n\n---\n\n## 报告周期: {period}\n\n## 报告正文:\n\n{text}"
 
