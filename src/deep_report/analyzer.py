@@ -913,11 +913,13 @@ class ReportAnalyzer:
             except Exception:
                 pass
             if providers:
-                return call_with_fallback(
+                result = call_with_fallback(
                     providers=providers, system_prompt=system_prompt,
                     user_prompt=user_prompt, max_tokens=max_tokens,
                     temperature=0.3, timeout=120,
                 )
+                if result:
+                    return result
         except ImportError:
             logger.debug("Local LLM client not available, trying morning-brief...")
 
