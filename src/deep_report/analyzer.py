@@ -44,6 +44,14 @@ class ReportAnalyzer:
             logger.error("No text extracted from any report")
             return None
 
+        # Detect transition / short-period filings and adjust period label
+        report_period = self._detect_filing_period(texts[0]["text"], period)
+        if report_period != period:
+            logger.info("Adjusted period: %s → %s", period, report_period)
+            period = report_period
+            for t in texts:
+                t["period"] = report_period
+
         logger.info("Text extracted from %d reports", len(texts))
 
         # Step 2: LLM KPI extraction (Pass 1 — per-report)
@@ -115,6 +123,7 @@ class ReportAnalyzer:
         "MNSO": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
         "0700.HK": [("9988.HK", "阿里巴巴", "互联网平台"), ("3690.HK", "美团", "本地生活")],
         "600519.SH": [("000858.SZ", "五粮液", "高端白酒"), ("000568.SZ", "泸州老窖", "高端白酒")],
+        "PDD": [("BABA", "阿里巴巴", "电商平台"), ("JD", "京东", "电商平台")],
     }
 
     _PEER_FALLBACK: dict[str, list[tuple[str, str, str]]] = {
@@ -307,6 +316,36 @@ class ReportAnalyzer:
                 parts.append(f"- {r} （{first} → {last}，本期未再提及）")
         parts.append("")
         return "\n".join(parts)
+
+    @staticmethod
+    def _detect_filing_period(text: str, user_period: str) -> str:
+        """Detect transition/short-period filings and return correct period label.
+
+        Example: MNSO 20-F for Jul-Dec 2023 transition period →
+        'Jul-Dec2023(6mo_Transition)' instead of '2024FY'.
+        """
+        import re as _re
+        m = _re.search(
+            r'TRANSITION REPORT.*?period from\s+(.+?)\s+to\s+([A-Z][a-z]+ \d{1,2}, \d{4})',
+            text[:5000], _re.IGNORECASE | _re.DOTALL,
+        )
+        if m:
+            from_d = m.group(1).strip()
+            to_d = m.group(2).strip()
+            # Parse dates and compute duration
+            try:
+                from_parsed = _re.match(r'([A-Z][a-z]+) (\d{1,2}), (\d{4})', from_d)
+                to_parsed = _re.match(r'([A-Z][a-z]+) (\d{1,2}), (\d{4})', to_d)
+                if from_parsed and to_parsed:
+                    from_mon = from_parsed.group(1)[:3]
+                    to_mon = to_parsed.group(1)[:3]
+                    to_yr = to_parsed.group(3)
+                    label = f"{from_mon}-{to_mon}{to_yr}(Transition)"
+                    logger.info("Detected TRANSITION REPORT: %s → label=%s", from_d, label)
+                    return label
+            except Exception:
+                pass
+        return user_period
 
     # ── Text Extraction ──
 
@@ -792,6 +831,40 @@ class ReportAnalyzer:
                 return float(val) if val is not None else None
         return None
 
+    # ── Reference Card Builder (anti-hallucination) ──
+
+    @classmethod
+    def _build_ref_card(cls, kpis_list: list[dict]) -> str:
+        """Pre-compute key metrics in human-readable format.
+
+        Prevents LLM arithmetic hallucination by providing ready-to-use
+        formatted values (e.g. converts 7632.5百万元→76.3亿).
+        """
+        entry = kpis_list[-1] if kpis_list else {}
+        refs = []
+        for kpi in entry.get("kpis", []):
+            field = kpi.get("field", "")
+            val = kpi.get("value")
+            unit = str(kpi.get("unit", "")).lower()
+            if val is None:
+                continue
+            try:
+                v = float(val)
+            except (ValueError, TypeError):
+                continue
+            base = cls._UNIT_MULTIPLIER.get(unit, 1)
+            yi = v * base / 100_000_000  # Convert to 亿 (100 million)
+            if field in ("revenue", "net_profit", "gross_profit", "operating_profit", "total_assets", "total_equity"):
+                refs.append(f"- {field}（{kpi.get('label', field)}）: **{yi:.1f}亿** (原始: {v} {unit})")
+            elif field in ("gross_margin", "net_margin", "roe"):
+                refs.append(f"- {field}（{kpi.get('label', field)}）: **{v:.1f}%**")
+            elif field in ("eps",):
+                refs.append(f"- {field}（{kpi.get('label', field)}）: **{v:.2f}** {unit}")
+        if not refs:
+            return ""
+        header = "📋 参考数据卡（标题/正文引用财务数据请直接复制以下格式化数值，禁止自行换算）:\n"
+        return header + "\n".join(refs) + "\n"
+
     # ── LLM Pass 2: Cross-Period Analysis ──
 
     def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str,
@@ -812,6 +885,12 @@ class ReportAnalyzer:
             extra_sections.append(risk_evolution)
         if peer_text:
             extra_sections.append(peer_text)
+
+        # ── Anti-hallucination: pre-compute formatted reference values ──
+        ref_card = self._build_ref_card(kpis_list)
+        if ref_card:
+            extra_sections.append(ref_card)
+
         extra_block = "\n".join(extra_sections) if extra_sections else ""
 
         user_prompt = f"""## 股票: {code}
@@ -829,7 +908,8 @@ class ReportAnalyzer:
 2. 每个模块包含数据表 + 分析解读
 3. 区分一次性项目 vs 主营业务
 4. 指出异常数据点
-5. 风格参考海豚投研——有观点，用数据说话"""
+5. 风格参考海豚投研——有观点，用数据说话
+6. ⚠️ 标题和正文中引用财务数据，**必须原样使用上方「📋 参考数据卡」的格式化数值**，禁止自行换算（例如 "76.3亿" 正确，"763亿" 错误）"""
 
         narrative = self._call_llm(
             f"{prompt}\n\n{user_prompt}",
