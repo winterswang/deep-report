@@ -10,8 +10,9 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger("deep_report.fetcher")
 
-# Downloads base dir (shared with unified-downloader)
-DOWNLOADS_BASE = Path("/root/code/unified-downloader/downloads")
+# Downloads base dir — environment-aware, shared with unified-downloader
+_DEFAULT_DOWNLOADS = Path.home() / "code/claude_code/unified-downloader/downloads"
+DOWNLOADS_BASE = Path(os.environ.get("DEEP_REPORT_DOWNLOADS", _DEFAULT_DOWNLOADS))
 
 # Market detection (simple heuristic, refine later)
 A_SH_RE = re.compile(r"^\d{6}\.(SZ|SH)$")
@@ -85,11 +86,16 @@ class ReportFetcher:
             logger.info("  %s %d %s → 已存在: %s", code, year, dl_type, existing)
             return existing
 
+        # Normalize A-share code: strip .SH/.SZ suffix for cninfo API
+        dl_code = code
+        if market == "CN" and A_SH_RE.match(code.upper()):
+            dl_code = code.upper().replace(".SH", "").replace(".SZ", "")
+
         # Build command
         # For US stocks, download both PDF and keep HTML originals when available.
         # HTML preserves table structure better than PDF.
         cmd = [
-            "unified-downloader", "download", "single", code,
+            "unified-downloader", "download", "single", dl_code,
             "-t", dl_type,
             "-m", self._market_flag(market),
             "-y", str(year),
