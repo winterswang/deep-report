@@ -792,10 +792,15 @@ class ReportAnalyzer:
         # Build credibility table from guidance vs actuals
         credibility = self._build_credibility_table(kpis_list)
 
+        # Build risk evolution table (P2 — cross-period risk tracking)
+        risk_evolution = self._build_risk_evolution_table(kpis_list)
+
         user_prompt = f"""## 股票: {code}
 ## 当前分析周期: {current_period}
 
 {credibility}
+
+{risk_evolution}
 
 ## 历史KPI数据:
 
@@ -993,6 +998,116 @@ class ReportAnalyzer:
             "|-----------|-----------|---------|--------|\n"
         )
         return header + "\n".join(rows) + "\n"
+
+    @staticmethod
+    def _build_risk_evolution_table(kpis_list: list[dict]) -> str:
+        """Build a risk factor evolution table across periods.
+
+        Tracks which risks appear, disappear, or persist across reporting
+        periods by comparing management_guidance.risk_mentions.
+        Produces a structured markdown table for the LLM to reference
+        in the 九、展望与风险 analysis.
+        """
+        # Sort by period ascending
+        def _period_key(entry):
+            p = entry.get("_period", "")
+            freq_order = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
+            try:
+                y = int(p[:4])
+                f = p[4:].upper()
+                return (y, freq_order.get(f, 0))
+            except (ValueError, IndexError):
+                return (0, 0)
+
+        sorted_kpis = sorted(kpis_list, key=_period_key)
+
+        # Collect risk_mentions per period
+        period_risks: list[tuple[str, list[str]]] = []
+        for entry in sorted_kpis:
+            guidance = entry.get("management_guidance")
+            if not guidance:
+                continue
+            risks = guidance.get("risk_mentions", [])
+            if risks:
+                period_risks.append((entry.get("_period", "?"), risks))
+
+        if len(period_risks) < 2:
+            return ""
+
+        # Normalize risk text: lowercase, strip punctuation, collapse whitespace
+        def _norm(risk: str) -> str:
+            import re as _re
+            s = risk.lower().strip()
+            s = _re.sub(r"[，。；：！？、,\\.;:!?\\s]+", " ", s)
+            s = _re.sub(r"\\s+", "", s)
+            return s
+
+        # Build risk inventory with lifecycle
+        # risk_normalized → {first_period, last_period, original}
+        risk_lifecycle: dict[str, dict] = {}
+        for period, risks in period_risks:
+            for r in risks:
+                normed = _norm(r)
+                if normed in risk_lifecycle:
+                    risk_lifecycle[normed]["last_period"] = period
+                else:
+                    risk_lifecycle[normed] = {
+                        "first_period": period,
+                        "last_period": period,
+                        "original": r,
+                    }
+
+        current_period = period_risks[-1][0] if period_risks else "?"
+
+        # Categorize risks
+        new_risks = []       # First appeared in current period
+        persistent = []      # Spans 3+ periods
+        recurring = []       # Appeared in 2 periods (including current), not persistent
+        resolved = []        # Last appeared before current period
+        for normed, info in risk_lifecycle.items():
+            first = info["first_period"]
+            last = info["last_period"]
+            if last == current_period:
+                if first == current_period:
+                    new_risks.append(info["original"])
+                elif last != first:
+                    # Count how many periods it appears in
+                    appearances = sum(
+                        1 for p, risks in period_risks
+                        if any(_norm(r) == normed for r in risks)
+                    )
+                    if appearances >= 3:
+                        persistent.append(info["original"])
+                    else:
+                        recurring.append(info["original"])
+            else:
+                resolved.append((info["original"], first, last))
+
+        # Build output
+        parts = ["## 风险因子跨期变化追踪\n"]
+
+        if new_risks:
+            parts.append(f"\n### 🆕 本期新出现风险 ({current_period})")
+            for r in new_risks:
+                parts.append(f"- {r}")
+
+        if persistent:
+            parts.append("\n### 🔁 持续风险 (≥3期)")
+            for r in persistent:
+                parts.append(f"- {r}")
+
+        if recurring:
+            parts.append("\n### 🔄 反复出现风险")
+            for r in recurring:
+                parts.append(f"- {r}")
+
+        if resolved:
+            parts.append("\n### ✅ 已消退风险")
+            for r, first, last in resolved:
+                parts.append(f"- {r} （{first} → {last}，本期未再提及）")
+
+        parts.append("")
+        return "\n".join(parts)
 
     # ── LLM Client ──
 
