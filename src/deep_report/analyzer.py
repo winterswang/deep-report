@@ -131,38 +131,43 @@ class ReportAnalyzer:
             peers = self._PEER_FALLBACK.get(market, [])[:2]
         if not peers:
             return []
+        # Import once outside peer loop
+        import os as _os
+        import sys as _sys
+        sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
+        _sys.path.insert(0, sdk_path)
+        _sys.path.insert(0, f"{sdk_path}/src")
+        from financial_sdk import FinancialFacade
+        facade = FinancialFacade()
+
+        def _latest(data_dict, field):
+            if not data_dict or not isinstance(data_dict, dict):
+                return None
+            vals = data_dict.get(field, {})
+            if isinstance(vals, dict) and vals:
+                idx = sorted(vals.keys())[-1]
+                v = vals[idx]
+                return float(v) if v is not None else None
+            return None
+
+        def _to_dict(obj):
+            if obj is None:
+                return {}
+            if hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            if hasattr(obj, '__call__'):
+                obj = obj()
+            if hasattr(obj, 'to_dict'):
+                return obj.to_dict()
+            return {}
+
         results = []
         for p_code, p_name, p_cat in peers:
             try:
-                import os as _os, sys as _sys
-                sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
-                _sys.path.insert(0, sdk_path)
-                _sys.path.insert(0, f"{sdk_path}/src")
-                from financial_sdk import FinancialFacade
-                f = FinancialFacade()
-                bundle = f.get_financial_data(p_code, report_type="all", period="annual")
+                bundle = facade.get_financial_data(p_code, report_type="all", period="annual")
                 if not bundle:
                     continue
                 income = getattr(bundle, 'income_statement', None)
-                def _latest(data_dict, field):
-                    if not data_dict or not isinstance(data_dict, dict):
-                        return None
-                    vals = data_dict.get(field, {})
-                    if isinstance(vals, dict) and vals:
-                        idx = sorted(vals.keys())[-1]
-                        v = vals[idx]
-                        return float(v) if v is not None else None
-                    return None
-                def _to_dict(obj):
-                    if obj is None:
-                        return {}
-                    if hasattr(obj, 'to_dict'):
-                        return obj.to_dict()
-                    if hasattr(obj, '__call__'):
-                        obj = obj()
-                    if hasattr(obj, 'to_dict'):
-                        return obj.to_dict()
-                    return {}
                 idict = _to_dict(income)
                 bdict = _to_dict(getattr(bundle, 'balance_sheet', None))
                 results.append({
@@ -204,19 +209,22 @@ class ReportAnalyzer:
                   "|------|---------|------|--------|--------|\n")
         return header + "\n".join(rows) + "\n"
 
+    @staticmethod
+    def _period_sort_key(entry: dict) -> tuple[int, int]:
+        """Sort key for period identifiers (e.g. 2025Q1, 2025FY)."""
+        p = entry.get("_period", "")
+        freq = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
+        try:
+            return (int(p[:4]), freq.get(p[4:].upper(), 0))
+        except (ValueError, IndexError):
+            return (0, 0)
+
     # ── Management Credibility & Risk Evolution ──
 
     @staticmethod
     def _build_credibility_table(kpis_list: list[dict]) -> str:
         """Guidance-vs-actual tracking table."""
-        def _period_key(entry):
-            p = entry.get("_period", "")
-            freq = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
-            try:
-                return (int(p[:4]), freq.get(p[4:].upper(), 0))
-            except (ValueError, IndexError):
-                return (0, 0)
-        sorted_kpis = sorted(kpis_list, key=_period_key)
+        sorted_kpis = sorted(kpis_list, key=ReportAnalyzer._period_sort_key)
         if len(sorted_kpis) < 2:
             return ""
         def _get_revenue(entry):
@@ -250,14 +258,7 @@ class ReportAnalyzer:
     @staticmethod
     def _build_risk_evolution_table(kpis_list: list[dict]) -> str:
         """Risk factor evolution across periods."""
-        def _period_key(entry):
-            p = entry.get("_period", "")
-            freq = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
-            try:
-                return (int(p[:4]), freq.get(p[4:].upper(), 0))
-            except (ValueError, IndexError):
-                return (0, 0)
-        sorted_kpis = sorted(kpis_list, key=_period_key)
+        sorted_kpis = sorted(kpis_list, key=ReportAnalyzer._period_sort_key)
         period_risks: list[tuple[str, list[str]]] = []
         for entry in sorted_kpis:
             guidance = entry.get("management_guidance")
