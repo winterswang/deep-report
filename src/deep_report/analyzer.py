@@ -90,15 +90,222 @@ class ReportAnalyzer:
                     validation.get("summary", {}).get("avg_deviation_pct", 0),
                 )
 
-        # Step 5: LLM analysis (Pass 2 — cross-period)
-        narrative = self._analyze_multi_period(kpis_list, code, period)
+        # Step 5: Fetch peer comparison data (industry context)
+        peers = self._fetch_peer_data(code)
+
+        # Step 6: LLM analysis (Pass 2 — cross-period, with peer + credibility + risk context)
+        peer_text = self._format_peer_data_for_llm(peers)
+        credibility = self._build_credibility_table(kpis_list)
+        risk_evolution = self._build_risk_evolution_table(kpis_list)
+        narrative = self._analyze_multi_period(kpis_list, code, period, peer_text, credibility, risk_evolution)
 
         return {
             "kpis": kpis_list,
             "trends": self._build_trend_table(kpis_list),
             "narrative": narrative,
             "validation": validation,
+            "peers": peers,
         }
+
+    # ── Industry Peer Comparison ──
+
+    # Industry peer mapping: stock_code → list of comparable stocks
+    _PEER_MAP: dict[str, list[tuple[str, str, str]]] = {
+        "9896.HK": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
+        "MNSO": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
+        "0700.HK": [("9988.HK", "阿里巴巴", "互联网平台"), ("3690.HK", "美团", "本地生活")],
+        "600519.SH": [("000858.SZ", "五粮液", "高端白酒"), ("000568.SZ", "泸州老窖", "高端白酒")],
+    }
+
+    _PEER_FALLBACK: dict[str, list[tuple[str, str, str]]] = {
+        "A": [("600519.SH", "贵州茅台", "A股蓝筹"), ("000858.SZ", "五粮液", "A股消费")],
+        "HK": [("0700.HK", "腾讯", "港股科技"), ("9988.HK", "阿里巴巴", "港股互联网")],
+        "US": [("AAPL", "Apple", "美股科技"), ("MSFT", "Microsoft", "美股软件")],
+    }
+
+    def _fetch_peer_data(self, code: str) -> list[dict]:
+        code_upper = code.upper()
+        peers = self._PEER_MAP.get(code_upper)
+        if not peers:
+            market = self._detect_market_for_peers(code_upper)
+            peers = self._PEER_FALLBACK.get(market, [])[:2]
+        if not peers:
+            return []
+        results = []
+        for p_code, p_name, p_cat in peers:
+            try:
+                import os as _os, sys as _sys
+                sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
+                _sys.path.insert(0, sdk_path)
+                _sys.path.insert(0, f"{sdk_path}/src")
+                from financial_sdk import FinancialFacade
+                f = FinancialFacade()
+                bundle = f.get_financial_data(p_code, report_type="all", period="annual")
+                if not bundle:
+                    continue
+                income = getattr(bundle, 'income_statement', None)
+                def _latest(data_dict, field):
+                    if not data_dict or not isinstance(data_dict, dict):
+                        return None
+                    vals = data_dict.get(field, {})
+                    if isinstance(vals, dict) and vals:
+                        idx = sorted(vals.keys())[-1]
+                        v = vals[idx]
+                        return float(v) if v is not None else None
+                    return None
+                def _to_dict(obj):
+                    if obj is None:
+                        return {}
+                    if hasattr(obj, 'to_dict'):
+                        return obj.to_dict()
+                    if hasattr(obj, '__call__'):
+                        obj = obj()
+                    if hasattr(obj, 'to_dict'):
+                        return obj.to_dict()
+                    return {}
+                idict = _to_dict(income)
+                bdict = _to_dict(getattr(bundle, 'balance_sheet', None))
+                results.append({
+                    "code": p_code, "name": p_name, "category": p_cat,
+                    "metrics": {
+                        "revenue": _latest(idict, "revenue"),
+                        "net_profit": _latest(idict, "net_profit"),
+                        "gross_profit": _latest(idict, "gross_profit"),
+                        "total_assets": _latest(bdict, "total_assets"),
+                    },
+                })
+            except Exception as e:
+                logger.debug("Peer %s fetch failed: %s", p_code, e)
+        logger.info("Peer data fetched: %d/%d", len(results), len(peers))
+        return results
+
+    @staticmethod
+    def _detect_market_for_peers(code: str) -> str:
+        u = code.upper()
+        if u.endswith(".SH") or u.endswith(".SZ"):
+            return "A"
+        if u.endswith(".HK"):
+            return "HK"
+        return "US"
+
+    @staticmethod
+    def _format_peer_data_for_llm(peers: list[dict]) -> str:
+        if not peers:
+            return ""
+        rows = []
+        for p in peers:
+            m = p.get("metrics", {})
+            rev = f"{m['revenue']:,.0f}" if m.get("revenue") else "N/A"
+            np_val = f"{m['net_profit']:,.0f}" if m.get("net_profit") else "N/A"
+            gp = f"{m['gross_profit']:,.0f}" if m.get("gross_profit") else "N/A"
+            rows.append(f"| {p['name']} ({p['code']}) | {p['category']} | {rev} | {np_val} | {gp} |")
+        header = ("## 行业可比公司数据\n\n"
+                  "| 公司 | 可比维度 | 营收 | 净利润 | 毛利润 |\n"
+                  "|------|---------|------|--------|--------|\n")
+        return header + "\n".join(rows) + "\n"
+
+    # ── Management Credibility & Risk Evolution ──
+
+    @staticmethod
+    def _build_credibility_table(kpis_list: list[dict]) -> str:
+        """Guidance-vs-actual tracking table."""
+        def _period_key(entry):
+            p = entry.get("_period", "")
+            freq = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
+            try:
+                return (int(p[:4]), freq.get(p[4:].upper(), 0))
+            except (ValueError, IndexError):
+                return (0, 0)
+        sorted_kpis = sorted(kpis_list, key=_period_key)
+        if len(sorted_kpis) < 2:
+            return ""
+        def _get_revenue(entry):
+            for kpi in entry.get("kpis", []):
+                if kpi.get("field") == "revenue" and kpi.get("value") is not None:
+                    try:
+                        return float(kpi["value"]), kpi.get("unit", "")
+                    except (ValueError, TypeError):
+                        pass
+            return None, ""
+        rows = []
+        for i in range(len(sorted_kpis) - 1):
+            guidance = sorted_kpis[i].get("management_guidance")
+            if not guidance:
+                continue
+            outlook = guidance.get("revenue_outlook", "")
+            if not outlook:
+                continue
+            actual_val, unit = _get_revenue(sorted_kpis[i + 1])
+            if actual_val is None:
+                continue
+            rows.append(f"| {sorted_kpis[i].get('_period','?')} | {outlook} | "
+                        f"{sorted_kpis[i+1].get('_period','?')} | {actual_val}{unit} |")
+        if not rows:
+            return ""
+        return ("## 管理层可信度追踪（指引 vs 实际）\n\n"
+                "| 指引来源季 | 管理层展望 | 实际季度 | 实际收入 |\n"
+                "|-----------|-----------|---------|--------|\n"
+                + "\n".join(rows) + "\n")
+
+    @staticmethod
+    def _build_risk_evolution_table(kpis_list: list[dict]) -> str:
+        """Risk factor evolution across periods."""
+        def _period_key(entry):
+            p = entry.get("_period", "")
+            freq = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "FY": 5, "HY": 6}
+            try:
+                return (int(p[:4]), freq.get(p[4:].upper(), 0))
+            except (ValueError, IndexError):
+                return (0, 0)
+        sorted_kpis = sorted(kpis_list, key=_period_key)
+        period_risks: list[tuple[str, list[str]]] = []
+        for entry in sorted_kpis:
+            guidance = entry.get("management_guidance")
+            if guidance:
+                risks = guidance.get("risk_mentions", [])
+                if risks:
+                    period_risks.append((entry.get("_period", "?"), risks))
+        if len(period_risks) < 2:
+            return ""
+        import re as _re
+        def _norm(risk: str) -> str:
+            s = risk.lower().strip()
+            s = _re.sub(r"[，。；：！？、,\;:!?\s]+", " ", s)
+            s = _re.sub(r"\s+", "", s)
+            return s
+        risk_lifecycle: dict[str, dict] = {}
+        for period, risks in period_risks:
+            for r in risks:
+                normed = _norm(r)
+                if normed in risk_lifecycle:
+                    risk_lifecycle[normed]["last_period"] = period
+                else:
+                    risk_lifecycle[normed] = {"first_period": period, "last_period": period, "original": r}
+        current_period = period_risks[-1][0] if period_risks else "?"
+        new_risks, persistent, resolved = [], [], []
+        for normed, info in risk_lifecycle.items():
+            if info["last_period"] == current_period:
+                if info["first_period"] == current_period:
+                    new_risks.append(info["original"])
+                else:
+                    persistent.append(info["original"])
+            else:
+                resolved.append((info["original"], info["first_period"], info["last_period"]))
+        parts = ["## 风险因子跨期变化追踪\n"]
+        if new_risks:
+            parts.append(f"\n### 🆕 本期新出现风险 ({current_period})")
+            for r in new_risks:
+                parts.append(f"- {r}")
+        if persistent:
+            parts.append("\n### 🔁 持续风险")
+            for r in persistent:
+                parts.append(f"- {r}")
+        if resolved:
+            parts.append("\n### ✅ 已消退风险")
+            for r, first, last in resolved:
+                parts.append(f"- {r} （{first} → {last}，本期未再提及）")
+        parts.append("")
+        return "\n".join(parts)
 
     # ── Text Extraction ──
 
@@ -222,7 +429,12 @@ class ReportAnalyzer:
 
     @staticmethod
     def _sample_key_sections(text: str, max_chars: int, market: str = "") -> str:
-        """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
+        """Anchor-based sampling with data density scoring.
+
+        Locates key financial sections via bilingual anchors, scores each
+        match by data density (digits + table markers), and picks the
+        best match(es) per anchor type. Avoids TOC false positives.
+        """
 
         # Chinese anchors (A-share / HK)
         _CN_ANCHORS = [
@@ -234,41 +446,59 @@ class ReportAnalyzer:
         ]
         # English anchors (US filings)
         _EN_ANCHORS = [
-            ("income_statement", r"(?i)(?:consolidated\s+statements?\s+of\s+income|income\s+statement)", 2000),
+            ("income_statement", r"(?i)(?:consolidated\s+statements?\s+of\s+(?:income|operations)|income\s+statement)", 2000),
             ("balance_sheet", r"(?i)(?:consolidated\s+balance\s+sheets?|balance\s+sheet)", 2000),
             ("cash_flow", r"(?i)(?:consolidated\s+statements?\s+of\s+cash\s+flows?|cash\s+flow)", 2000),
+            ("mda", r"(?i)(?:[Mm]anagement'?s?\s+[Dd]iscussion|[Rr]esults?\s+of\s+[Oo]perations|[Ff]inancial\s+[Cc]ondition)", 3000),
             ("total_revenue", r"(?i)(?:^(?:Total\s+)?[Rr]evenue\s*\$)", 1500),
             ("gross_profit", r"(?i)(?:^(?:Gross\s+[Pp]rofit|Cost\s+of\s+[Rr]evenue)\s*\$)", 1500),
-            ("mda", r"(?i)(?:[Mm]anagement'?s?\s+[Dd]iscussion|[Rr]esults?\s+of\s+[Oo]perations|[Ff]inancial\s+[Cc]ondition)", 3000),
+            ("segment_info", r"(?i)(?:Note\s+\d+.*?Segment|Segment\s+(?:Information|Reporting|Data))", 3000),
             ("operating_income", r"(?i)(?:[Oo]perating\s+[Ii]ncome|[Ii]ncome\s+from\s+[Oo]perations)\s*\$", 1500),
             ("net_income", r"(?i)(?:[Nn]et\s+[Ii]ncome|[Nn]et\s+[Ee]arnings)\s*\$", 1500),
         ]
         # Select anchors by market to avoid useless cross-language scans
         is_cn = market in ("CN", "HK")
-        anchors = _CN_ANCHORS + _EN_ANCHORS if not is_cn else _CN_ANCHORS
+        anchors = _CN_ANCHORS if is_cn else _CN_ANCHORS + _EN_ANCHORS
 
         sections = []
-        seen_ranges = set()  # Track (start,end) to avoid overlaps
+        used_ranges = []  # (start, end) to avoid overlaps
 
         for _name, pattern, context_size in anchors:
-            if sum(len(s) for s in sections) >= max_chars * 0.8:
+            if sum(len(s) for s in sections) >= max_chars * 0.85:
                 break
-            matched = 0
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                if matched >= 3:
+
+            # Collect all matches, score by data density
+            scored = []
+            for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE):
+                pre = max(0, match.start() - context_size // 4)
+                post = min(len(text), match.end() + context_size)
+                candidate = text[pre:post]
+                # Score: digit count + table lines (weighted) to prefer data-rich sections
+                digit_count = sum(1 for c in candidate if c.isdigit())
+                table_lines = candidate.count("|")
+                score = digit_count + table_lines * 10
+                if score > 50:  # Require minimum data density
+                    scored.append((score, pre, post))
+
+            # Take up to 3 best matches per anchor (dedup by overlap)
+            scored.sort(reverse=True)
+            taken = 0
+            for score, start, end in scored:
+                if taken >= 3:
                     break
-                start = max(0, match.start() - context_size)
-                end = min(len(text), match.end() + context_size)
-                section_text = text[start:end]
-                # Skip overlapped sections (>50% overlap with existing)
+                # Check overlap with already-sampled sections (>50% overlap = skip)
                 overlaps = any(
-                    max(start, s) < min(end, e) and (min(end, e) - max(start, s)) > (end - start) * 0.5
-                    for s, e in seen_ranges
+                    max(start, s) < min(end, e)
+                    and (min(end, e) - max(start, s)) > (end - start) * 0.5
+                    for s, e in used_ranges
                 )
-                if len(section_text) > 200 and not overlaps:
-                    seen_ranges.add((start, end))
-                    sections.append(f"\n--- Section: {_name}[{matched+1}] ---\n{section_text}")
-                    matched += 1
+                if overlaps:
+                    continue
+                section_text = text[start:end]
+                if len(section_text) > 200:
+                    used_ranges.append((start, end))
+                    sections.append(f"\n--- Section: {_name}[{taken+1}] ---\n{section_text}")
+                    taken += 1
 
         if not sections:
             # Fallback: first 60% + last 40%
@@ -563,7 +793,8 @@ class ReportAnalyzer:
 
     # ── LLM Pass 2: Cross-Period Analysis ──
 
-    def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str) -> str | None:
+    def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str,
+                               peer_text: str = "", credibility: str = "", risk_evolution: str = "") -> str | None:
         """LLM 对多期 KPI 做趋势分析和叙事生成"""
         prompt = self._load_prompt("analyze.md")
         if not prompt:
@@ -572,8 +803,20 @@ class ReportAnalyzer:
         # Format KPIs as text for LLM consumption
         kpi_text = self._format_kpis_for_llm(kpis_list)
 
+        # Build context sections
+        extra_sections = []
+        if credibility:
+            extra_sections.append(credibility)
+        if risk_evolution:
+            extra_sections.append(risk_evolution)
+        if peer_text:
+            extra_sections.append(peer_text)
+        extra_block = "\n".join(extra_sections) if extra_sections else ""
+
         user_prompt = f"""## 股票: {code}
 ## 当前分析周期: {current_period}
+
+{extra_block}
 ## 历史KPI数据:
 
 {kpi_text}
@@ -640,7 +883,45 @@ class ReportAnalyzer:
     # ── LLM Client ──
 
     def _call_llm(self, user_prompt: str, max_tokens: int = 4000) -> str | None:
-        """调用 LLM（复用 morning-brief 的 LLM client）"""
+        """调用 LLM（优先本地 client，fallback morning-brief）"""
+        system_prompt = "你是一位资深财务分析师，擅长从财报中提取关键数据并撰写深度分析。用中文回复。"
+
+        # ── Primary: local LLM client (self-contained) ──
+        try:
+            from deep_report._llm_client import (
+                LLMProvider, call_with_fallback,
+                DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
+                get_deepseek_api_key,
+                get_ark_api_key, LLM_ENDPOINT as ARK_ENDPOINT,
+            )
+            providers = []
+            try:
+                providers.append(LLMProvider(
+                    endpoint=DEEPSEEK_ENDPOINT, model=DEEPSEEK_MODEL,
+                    api_key=get_deepseek_api_key(), label="DeepSeek",
+                ))
+            except Exception as e:
+                logger.warning("DeepSeek init failed: %s", e)
+            try:
+                ark_key = get_ark_api_key()
+                if ark_key:
+                    providers.append(LLMProvider(
+                        endpoint=ARK_ENDPOINT, model="doubao-seed-2.0-pro",
+                        api_key=ark_key, label="ARK",
+                        extra={"thinking": {"type": "disabled"}},
+                    ))
+            except Exception:
+                pass
+            if providers:
+                return call_with_fallback(
+                    providers=providers, system_prompt=system_prompt,
+                    user_prompt=user_prompt, max_tokens=max_tokens,
+                    temperature=0.3, timeout=120,
+                )
+        except ImportError:
+            logger.debug("Local LLM client not available, trying morning-brief...")
+
+        # ── Fallback: morning-brief ──
         try:
             import os as _os
             import sys as _sys
@@ -648,30 +929,24 @@ class ReportAnalyzer:
             _sys.path.insert(0, _mb_path)
 
             from src.utils.config import (
-                get_ark_api_key, get_deepseek_api_key,
-                LLM_ENDPOINT, LLM_MODEL,
-                DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
+                get_ark_api_key as _mb_ark, get_deepseek_api_key as _mb_ds,
+                LLM_ENDPOINT, LLM_MODEL, DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
             )
-            from src.utils.llm_client import LLMProvider, call_with_fallback
+            from src.utils.llm_client import LLMProvider as _MBProvider
+            from src.utils.llm_client import call_with_fallback as _mb_call
 
             providers = []
-            # Primary: DeepSeek (more reliable for large prompts than doubao)
             try:
-                providers.append(LLMProvider(
-                    endpoint=DEEPSEEK_ENDPOINT,
-                    model="deepseek-chat",
-                    api_key=get_deepseek_api_key(),
-                    label="DeepSeek",
+                providers.append(_MBProvider(
+                    endpoint=DEEPSEEK_ENDPOINT, model="deepseek-chat",
+                    api_key=_mb_ds(), label="DeepSeek",
                 ))
             except Exception:
                 pass
-            # Fallback: ARK (doubao), with 429 handled by retry + backoff
             try:
-                providers.append(LLMProvider(
-                    endpoint=LLM_ENDPOINT,
-                    model="doubao-seed-2.0-pro",
-                    api_key=get_ark_api_key(),
-                    label="ARK",
+                providers.append(_MBProvider(
+                    endpoint=LLM_ENDPOINT, model="doubao-seed-2.0-pro",
+                    api_key=_mb_ark(), label="ARK",
                     extra={"thinking": {"type": "disabled"}},
                 ))
             except Exception:
@@ -681,13 +956,10 @@ class ReportAnalyzer:
                 logger.error("No LLM providers available")
                 return None
 
-            return call_with_fallback(
-                providers=providers,
-                system_prompt="你是一位资深财务分析师，擅长从财报中提取关键数据并撰写深度分析。用中文回复。",
-                user_prompt=user_prompt,
-                max_tokens=max_tokens,
-                temperature=0.3,
-                timeout=120,
+            return _mb_call(
+                providers=providers, system_prompt=system_prompt,
+                user_prompt=user_prompt, max_tokens=max_tokens,
+                temperature=0.3, timeout=120,
             )
         except Exception as e:
             logger.error("LLM call failed: %s", e)
