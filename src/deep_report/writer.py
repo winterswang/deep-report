@@ -75,7 +75,7 @@ class ReportWriter:
 
         return f"""# {title}
 
-> 📅 分析日期: {self._today()} | 📊 数据源: SEC EDGAR / HKEX / 交易所公告 | ⚙️ 引擎: deep-report v0.1
+> 📅 分析日期: {self._today()} | 📊 数据源: SEC EDGAR / HKEX / 交易所公告 | ⚙️ 引擎: deep-report v0.2
 
 {narrative}
 

@@ -90,15 +90,224 @@ class ReportAnalyzer:
                     validation.get("summary", {}).get("avg_deviation_pct", 0),
                 )
 
-        # Step 5: LLM analysis (Pass 2 — cross-period)
-        narrative = self._analyze_multi_period(kpis_list, code, period)
+        # Step 5: Fetch peer comparison data (P2 — industry context)
+        peers = self._fetch_peer_data(code)
+
+        # Step 6: LLM analysis (Pass 2 — cross-period, with peer context)
+        peer_text = self._format_peer_data_for_llm(peers)
+        narrative = self._analyze_multi_period(kpis_list, code, period, peer_text)
 
         return {
             "kpis": kpis_list,
             "trends": self._build_trend_table(kpis_list),
             "narrative": narrative,
             "validation": validation,
+            "peers": peers,
         }
+
+    # ── Industry Peer Comparison ──
+
+    # Industry peer mapping: stock_code → list of comparable stocks
+    # Each peer: (code, name, brief description of comparability)
+    _PEER_MAP: dict[str, list[tuple[str, str, str]]] = {
+        # Consumer / Brand Retail
+        "9896.HK": [  # 名创优品
+            ("9992.HK", "泡泡玛特", "IP零售/潮玩"),
+            ("2020.HK", "安踏体育", "品牌零售/多品牌运营"),
+            ("2331.HK", "李宁", "品牌零售/国潮"),
+        ],
+        "MNSO": [  # US listing
+            ("9992.HK", "泡泡玛特", "IP零售/潮玩"),
+            ("2020.HK", "安踏体育", "品牌零售/多品牌运营"),
+            ("2331.HK", "李宁", "品牌零售/国潮"),
+        ],
+        # Tech / Internet
+        "0700.HK": [  # 腾讯
+            ("9988.HK", "阿里巴巴", "互联网平台"),
+            ("3690.HK", "美团", "本地生活/平台经济"),
+            ("9888.HK", "百度", "搜索/AI"),
+        ],
+        "BABA": [  # 阿里巴巴 US
+            ("0700.HK", "腾讯", "互联网平台"),
+            ("3690.HK", "美团", "本地生活/平台经济"),
+            ("9888.HK", "百度", "搜索/AI"),
+        ],
+        # EV / Auto
+        "1211.HK": [  # 比亚迪
+            ("2015.HK", "理想汽车", "新能源车"),
+            ("9866.HK", "蔚来", "新能源车"),
+            ("9868.HK", "小鹏汽车", "新能源车"),
+        ],
+        # Consumer Electronics
+        "1810.HK": [  # 小米
+            ("AAPL", "Apple", "消费电子/生态"),
+            ("1211.HK", "比亚迪", "新能源车/电子代工"),
+        ],
+        # A-share examples
+        "600519.SH": [  # 贵州茅台
+            ("000858.SZ", "五粮液", "高端白酒"),
+            ("000568.SZ", "泸州老窖", "高端白酒"),
+            ("002304.SZ", "洋河股份", "次高端白酒"),
+        ],
+    }
+
+    # Fallback: market-category peers when no specific mapping exists
+    _PEER_FALLBACK: dict[str, list[tuple[str, str, str]]] = {
+        "A": [  # A-share fallback
+            ("600519.SH", "贵州茅台", "A股蓝筹参考"),
+            ("601318.SH", "中国平安", "A股金融参考"),
+            ("000858.SZ", "五粮液", "A股消费参考"),
+        ],
+        "HK": [
+            ("0700.HK", "腾讯", "港股科技参考"),
+            ("9988.HK", "阿里巴巴", "港股互联网参考"),
+            ("1211.HK", "比亚迪", "港股制造参考"),
+        ],
+        "US": [
+            ("AAPL", "Apple", "美股科技参考"),
+            ("MSFT", "Microsoft", "美股软件参考"),
+            ("JPM", "JPMorgan", "美股金融参考"),
+        ],
+    }
+
+    def _fetch_peer_data(self, code: str) -> list[dict]:
+        """Fetch key financial metrics for industry peers via financial-sdk.
+
+        Returns list of {code, name, category, metrics: {revenue, net_profit,
+        revenue_growth, gross_margin, roe}} for each peer where data is available.
+        """
+        code_upper = code.upper()
+        peers = self._PEER_MAP.get(code_upper)
+
+        if not peers:
+            # Detect market and use fallback
+            market = self._detect_market_for_peers(code_upper)
+            fallback_peers = self._PEER_FALLBACK.get(market, [])
+            if fallback_peers:
+                peers = fallback_peers[:2]  # Limit fallback to 2 peers
+            else:
+                return []
+
+        results = []
+        for peer_code, peer_name, peer_category in peers:
+            peer_data = self._fetch_single_peer(peer_code, peer_name, peer_category)
+            if peer_data:
+                results.append(peer_data)
+
+        logger.info("Peer data fetched: %d/%d peers", len(results), len(peers))
+        return results
+
+    def _fetch_single_peer(self, peer_code: str, peer_name: str, category: str) -> dict | None:
+        """Fetch latest annual metrics for a single peer company."""
+        try:
+            import os as _os
+            import sys as _sys
+            _sdk_path = _os.environ.get(
+                "FINANCIAL_SDK_PATH",
+                str(Path.home() / "code/claude_code/financial-sdk"),
+            )
+            _sys.path.insert(0, _sdk_path)
+            _sys.path.insert(0, f"{_sdk_path}/src")
+            from financial_sdk import FinancialFacade
+            f = FinancialFacade()
+            bundle = f.get_financial_data(peer_code, report_type="all", period="annual")
+            if not bundle:
+                return None
+
+            income = getattr(bundle, 'income_statement', None)
+            bs = getattr(bundle, 'balance_sheet', None)
+
+            def _latest(data_dict: dict | None, field: str) -> float | None:
+                if not data_dict or not isinstance(data_dict, dict):
+                    return None
+                vals = data_dict.get(field, {})
+                if isinstance(vals, dict) and vals:
+                    idx = sorted(vals.keys())[-1]
+                    v = vals[idx]
+                    return float(v) if v is not None else None
+                return None
+
+            def _growth(data_dict, field: str) -> float | None:
+                """YoY growth for latest vs previous year."""
+                if not data_dict or not isinstance(data_dict, dict):
+                    return None
+                vals = data_dict.get(field, {})
+                if not isinstance(vals, dict) or len(vals) < 2:
+                    return None
+                indices = sorted(vals.keys())
+                cur, prev = vals[indices[-1]], vals[indices[-2]]
+                if cur is None or prev is None or prev == 0:
+                    return None
+                return round((float(cur) / float(prev) - 1) * 100, 1)
+
+            def _to_dict(obj):
+                if obj is None:
+                    return {}
+                if hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                if hasattr(obj, '__call__'):
+                    obj = obj()
+                if hasattr(obj, 'to_dict'):
+                    return obj.to_dict()
+                return {}
+
+            income_dict = _to_dict(income)
+            bs_dict = _to_dict(bs)
+
+            return {
+                "code": peer_code,
+                "name": peer_name,
+                "category": category,
+                "metrics": {
+                    "revenue": _latest(income_dict, "revenue"),
+                    "net_profit": _latest(income_dict, "net_profit"),
+                    "revenue_growth_pct": _growth(income_dict, "revenue"),
+                    "gross_profit": _latest(income_dict, "gross_profit"),
+                    "total_assets": _latest(bs_dict, "total_assets"),
+                    "total_equity": _latest(bs_dict, "total_equity"),
+                    "roe": None,  # Computed below
+                },
+            }
+        except Exception as e:
+            logger.debug("Failed to fetch peer %s: %s", peer_code, e)
+            return None
+
+    @staticmethod
+    def _detect_market_for_peers(code: str) -> str:
+        """Detect market from stock code for peer fallback."""
+        code_u = code.upper()
+        if code_u.endswith(".SH") or code_u.endswith(".SZ"):
+            return "A"
+        if code_u.endswith(".HK"):
+            return "HK"
+        return "US"
+
+    @staticmethod
+    def _format_peer_data_for_llm(peers: list[dict]) -> str:
+        """Format peer comparison data as markdown table for LLM consumption."""
+        if not peers:
+            return ""
+
+        rows = []
+        for p in peers:
+            m = p.get("metrics", {})
+            rev = f"{m['revenue']:,.0f}" if m.get("revenue") else "N/A"
+            np_val = f"{m['net_profit']:,.0f}" if m.get("net_profit") else "N/A"
+            growth = f"{m['revenue_growth_pct']:.1f}%" if m.get("revenue_growth_pct") else "N/A"
+            gross = f"{m['gross_profit']:,.0f}" if m.get("gross_profit") else "N/A"
+            roe_val = f"{m['roe']:.1f}%" if m.get("roe") else "N/A"
+
+            rows.append(
+                f"| {p['name']} ({p['code']}) | {p['category']} | "
+                f"{rev} | {np_val} | {growth} | {gross} | {roe_val} |"
+            )
+
+        header = (
+            "## 行业可比公司数据\n\n"
+            "| 公司 | 可比维度 | 营收 | 净利润 | 营收增速 | 毛利润 | ROE |\n"
+            "|------|---------|------|--------|---------|--------|-----|\n"
+        )
+        return header + "\n".join(rows) + "\n"
 
     # ── Text Extraction ──
 
@@ -186,9 +395,13 @@ class ReportAnalyzer:
         """将表格行列表转为 Markdown 表格"""
         if not rows:
             return ""
-        col_count = max(len(r) for r in rows)
+        # Normalize: replace None/empty with "—"
+        clean_rows = []
+        for r in rows:
+            clean_rows.append([str(c) if c is not None else "—" for c in r])
+        col_count = max(len(r) for r in clean_rows)
         # Pad rows
-        padded = [r + [""] * (col_count - len(r)) for r in rows]
+        padded = [r + [""] * (col_count - len(r)) for r in clean_rows]
         lines = []
         lines.append("| " + " | ".join(padded[0]) + " |")
         lines.append("|" + "|".join(["---"] * col_count) + "|")
@@ -200,31 +413,76 @@ class ReportAnalyzer:
 
     @staticmethod
     def _sample_key_sections(text: str, max_chars: int) -> str:
-        """Anchor-based sampling: locate key financial sections instead of simple head/tail."""
+        """Anchor-based sampling: locate key financial sections, skip TOC matches."""
 
-        # Key anchor patterns (ordered by priority)
+        # Key anchor patterns — use exact statement header patterns to avoid TOC
         anchors = [
-            ("consolidated statement", "CONSOLIDATED STATEMENTS OF", 3000),
-            ("income statement", "INCOME STATEMENT", 2000),
-            ("balance sheet", "BALANCE SHEET", 2000),
-            ("cash flow", "CASH FLOW", 2000),
-            ("revenue", r"(?i)\b(revenue|total revenues?)\b", 1500),
-            ("profit", r"(?i)\b(gross profit|operating profit|net profit)\b", 1500),
+            # Financial statements (exact header patterns, avoid TOC)
+            ("income_statement",
+             r"CONSOLIDATED STATEMENTS OF OPERATIONS\s*\n\s*\(In millions",
+             5000),
+            ("balance_sheet",
+             r"CONSOLIDATED BALANCE SHEETS\s*\n\s*\(In millions",
+             5000),
+            ("cash_flow_statement",
+             r"CONSOLIDATED STATEMENTS OF CASH FLOWS\s*\n\s*\(In millions",
+             5000),
+            # MD&A (Item 7)
+            ("mda_item7",
+             r"Item\s+7\.\s*Management.s\s+Discussion",
+             6000),
+            # Segment reporting
+            ("segment_info",
+             r"(?i)(Note\s+\d+.*?Segment|Segment\s+(Information|Reporting|Data))",
+             4000),
+            # Revenue breakdown (in MD&A or segment note)
+            ("revenue_detail",
+             r"(?i)(Net\s+Sales\s+by\s+(Reportable\s+)?Segment|Revenue\s+by\s+(Reportable\s+)?Segment)",
+             3000),
+            # Forward-looking / guidance (in MD&A)
+            ("outlook_guidance",
+             r"(?i)((Fiscal|FY)\s*2025.*?(outlook|expect|anticipate|guidance|forecast)|"
+             r"outlook.*?(fiscal|FY)\s*2025)",
+             3000),
         ]
 
         sections = []
+        used_ranges = []  # (start, end) to avoid overlap
 
         for _name, pattern, context_size in anchors:
-            if sum(len(s) for s in sections) >= max_chars * 0.8:
+            if sum(len(s) for s in sections) >= max_chars * 0.85:
                 break
-            for match in re.finditer(pattern, text, re.IGNORECASE):
-                start = max(0, match.start() - context_size)
+
+            # Find ALL matches, score by data density, pick the best one
+            best_match = None
+            best_score = 0
+            for match in re.finditer(pattern, text, re.IGNORECASE | re.MULTILINE):
+                start = max(0, match.start() - context_size // 4)
                 end = min(len(text), match.end() + context_size)
-                # Avoid overlap with already-sampled sections
-                section_text = text[start:end]
-                if len(section_text) > 200:
+                candidate = text[start:end]
+                # Score: count digits, dollar signs, table markers
+                digit_count = sum(1 for c in candidate if c.isdigit())
+                table_lines = candidate.count("|")
+                score = digit_count + table_lines * 10
+                if score > best_score:
+                    best_score = score
+                    best_match = (start, end)
+
+            if best_match and best_score > 50:  # Require minimum data
+                start, end = best_match
+                # Check overlap with already-sampled sections
+                overlap = False
+                overlap_start = start
+                for us, ue in used_ranges:
+                    if start < ue and end > us:
+                        overlap = True
+                        overlap_start = max(overlap_start, ue)
+                if overlap:
+                    start = overlap_start
+                if end - start > 200:
+                    section_text = text[start:end]
                     sections.append(f"\n--- Section: {_name} ---\n{section_text}")
-                break  # One sample per anchor type
+                    used_ranges.append((start, end))
 
         if not sections:
             # Fallback: first 60% + last 40%
@@ -245,7 +503,7 @@ class ReportAnalyzer:
             return None
 
         # Use anchor-based sampling: locate key sections then truncate
-        max_chars = 30000
+        max_chars = 50000
         if len(text) > max_chars:
             text = self._sample_key_sections(text, max_chars)
 
@@ -438,7 +696,10 @@ class ReportAnalyzer:
         try:
             import os as _os
             import sys as _sys
-            _sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
+            _sdk_path = _os.environ.get(
+                "FINANCIAL_SDK_PATH",
+                str(Path.home() / "code/claude_code/financial-sdk"),
+            )
             _sys.path.insert(0, _sdk_path)
             _sys.path.insert(0, f"{_sdk_path}/src")
             from financial_sdk import FinancialFacade
@@ -519,7 +780,7 @@ class ReportAnalyzer:
 
     # ── LLM Pass 2: Cross-Period Analysis ──
 
-    def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str) -> str | None:
+    def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str, peer_text: str = "") -> str | None:
         """LLM 对多期 KPI 做趋势分析和叙事生成"""
         prompt = self._load_prompt("analyze.md")
         if not prompt:
@@ -539,6 +800,8 @@ class ReportAnalyzer:
 ## 历史KPI数据:
 
 {kpi_text}
+
+{peer_text}
 
 ---
 
@@ -734,7 +997,56 @@ class ReportAnalyzer:
     # ── LLM Client ──
 
     def _call_llm(self, user_prompt: str, max_tokens: int = 4000) -> str | None:
-        """调用 LLM（复用 morning-brief 的 LLM client）"""
+        """调用 LLM（优先本地 client，fallback morning-brief）"""
+        system_prompt = "你是一位资深财务分析师，擅长从财报中提取关键数据并撰写深度分析。用中文回复。"
+
+        # ── Primary: local LLM client (self-contained, no morning-brief dependency) ──
+        try:
+            from deep_report._llm_client import (
+                LLMProvider, call_with_fallback,
+                DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
+                get_deepseek_api_key,
+                get_ark_api_key, LLM_ENDPOINT as ARK_ENDPOINT,
+            )
+
+            providers = []
+            # Primary: DeepSeek
+            try:
+                providers.append(LLMProvider(
+                    endpoint=DEEPSEEK_ENDPOINT,
+                    model=DEEPSEEK_MODEL,
+                    api_key=get_deepseek_api_key(),
+                    label="DeepSeek",
+                ))
+            except Exception as e:
+                logger.warning("DeepSeek provider init failed: %s", e)
+            # Fallback: ARK (doubao), if configured
+            try:
+                ark_key = get_ark_api_key()
+                if ark_key:
+                    providers.append(LLMProvider(
+                        endpoint=ARK_ENDPOINT,
+                        model="doubao-seed-2.0-pro",
+                        api_key=ark_key,
+                        label="ARK",
+                        extra={"thinking": {"type": "disabled"}},
+                    ))
+            except Exception:
+                pass
+
+            if providers:
+                return call_with_fallback(
+                    providers=providers,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                    timeout=120,
+                )
+        except ImportError:
+            logger.debug("Local LLM client not available, trying morning-brief...")
+
+        # ── Fallback: morning-brief (original behavior, for server deployment) ──
         try:
             import os as _os
             import sys as _sys
@@ -742,29 +1054,29 @@ class ReportAnalyzer:
             _sys.path.insert(0, _mb_path)
 
             from src.utils.config import (
-                get_ark_api_key, get_deepseek_api_key,
+                get_ark_api_key as _mb_get_ark,
+                get_deepseek_api_key as _mb_get_ds,
                 LLM_ENDPOINT, LLM_MODEL,
                 DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
             )
-            from src.utils.llm_client import LLMProvider, call_with_fallback
+            from src.utils.llm_client import LLMProvider as _MBProvider
+            from src.utils.llm_client import call_with_fallback as _mb_call
 
             providers = []
-            # Primary: DeepSeek (more reliable for large prompts than doubao)
             try:
-                providers.append(LLMProvider(
+                providers.append(_MBProvider(
                     endpoint=DEEPSEEK_ENDPOINT,
                     model="deepseek-chat",
-                    api_key=get_deepseek_api_key(),
+                    api_key=_mb_get_ds(),
                     label="DeepSeek",
                 ))
             except Exception:
                 pass
-            # Fallback: ARK (doubao), with 429 handled by retry + backoff
             try:
-                providers.append(LLMProvider(
+                providers.append(_MBProvider(
                     endpoint=LLM_ENDPOINT,
                     model="doubao-seed-2.0-pro",
-                    api_key=get_ark_api_key(),
+                    api_key=_mb_get_ark(),
                     label="ARK",
                     extra={"thinking": {"type": "disabled"}},
                 ))
@@ -775,9 +1087,9 @@ class ReportAnalyzer:
                 logger.error("No LLM providers available")
                 return None
 
-            return call_with_fallback(
+            return _mb_call(
                 providers=providers,
-                system_prompt="你是一位资深财务分析师，擅长从财报中提取关键数据并撰写深度分析。用中文回复。",
+                system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 max_tokens=max_tokens,
                 temperature=0.3,
