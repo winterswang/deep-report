@@ -1,6 +1,6 @@
 [project]
 name = "deep-report"
-version = "0.1.0"
+version = "0.2.0"
 description = "财报深度分析引擎 — LLM驱动的季度/年度财务报告分析"
 requires-python = ">=3.10"
 dependencies = [
