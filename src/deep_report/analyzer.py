@@ -10,6 +10,8 @@ from typing import Optional
 import pdfplumber
 from bs4 import BeautifulSoup
 
+from deep_report.config import MORNING_BRIEF_PATH
+
 logger = logging.getLogger("deep_report.analyzer")
 
 # Prompt templates loaded on first use
@@ -101,11 +103,32 @@ class ReportAnalyzer:
         # Step 5: Fetch peer comparison data (industry context)
         peers = self._fetch_peer_data(code)
 
+        # Step 5.5: Fetch valuation & technical indicators context
+        # Infer market from reports data
+        market = texts[0].get("market", "A") if texts else "A"
+        valuation_text = ""
+        tech_text = ""
+        try:
+            from deep_report.valuation import format_valuation_context as _val_ctx
+            valuation_text = _val_ctx(code, market)
+        except Exception as e:
+            logger.debug("Valuation context unavailable: %s", e)
+        try:
+            from deep_report.westock_provider import fetch_technical_indicators as _tech
+            tech_data = _tech(code, market)
+            if tech_data:
+                tech_text = ReportAnalyzer._format_tech_context(tech_data)
+        except Exception as e:
+            logger.debug("Technical context unavailable: %s", e)
+
         # Step 6: LLM analysis (Pass 2 — cross-period, with peer + credibility + risk context)
         peer_text = self._format_peer_data_for_llm(peers)
         credibility = self._build_credibility_table(kpis_list)
         risk_evolution = self._build_risk_evolution_table(kpis_list)
-        narrative = self._analyze_multi_period(kpis_list, code, period, peer_text, credibility, risk_evolution)
+        narrative = self._analyze_multi_period(
+            kpis_list, code, period, peer_text, credibility, risk_evolution,
+            valuation_text=valuation_text, tech_text=tech_text,
+        )
 
         return {
             "kpis": kpis_list,
@@ -119,11 +142,62 @@ class ReportAnalyzer:
 
     # Industry peer mapping: stock_code → list of comparable stocks
     _PEER_MAP: dict[str, list[tuple[str, str, str]]] = {
-        "9896.HK": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
+        # ── 白酒 ──
+        "600519.SH": [("000858.SZ", "五粮液", "高端白酒"), ("000568.SZ", "泸州老窖", "高端白酒"), ("002304.SZ", "洋河股份", "次高端白酒")],
+        "000858.SZ": [("600519.SH", "贵州茅台", "高端白酒"), ("000568.SZ", "泸州老窖", "高端白酒")],
+        # ── 互联网/平台 ──
+        "0700.HK": [("9988.HK", "阿里巴巴", "互联网平台"), ("3690.HK", "美团", "本地生活"), ("BIDU", "百度", "搜索/AI")],
+        "9988.HK": [("0700.HK", "腾讯", "互联网平台"), ("3690.HK", "美团", "本地生活"), ("PDD", "拼多多", "电商")],
+        "3690.HK": [("0700.HK", "腾讯", "互联网平台"), ("9988.HK", "阿里巴巴", "互联网平台")],
+        # ── 电商 ──
+        "PDD": [("BABA", "阿里巴巴", "电商平台"), ("JD", "京东", "电商平台"), ("MELI", "MercadoLibre", "拉美电商")],
+        "BABA": [("PDD", "拼多多", "电商平台"), ("JD", "京东", "电商平台"), ("0700.HK", "腾讯", "互联网平台")],
+        "JD": [("BABA", "阿里巴巴", "电商平台"), ("PDD", "拼多多", "电商平台")],
+        # ── 消费/零售 ──
         "MNSO": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
-        "0700.HK": [("9988.HK", "阿里巴巴", "互联网平台"), ("3690.HK", "美团", "本地生活")],
-        "600519.SH": [("000858.SZ", "五粮液", "高端白酒"), ("000568.SZ", "泸州老窖", "高端白酒")],
-        "PDD": [("BABA", "阿里巴巴", "电商平台"), ("JD", "京东", "电商平台")],
+        "9896.HK": [("9992.HK", "泡泡玛特", "IP零售/潮玩"), ("2020.HK", "安踏体育", "品牌零售")],
+        "9992.HK": [("9896.HK", "名创优品", "IP零售"), ("MNSO", "名创优品", "IP零售")],
+        # ── AI/半导体 ──
+        "NVDA": [("AMD", "AMD", "GPU/CPU"), ("AVGO", "博通", "网络/AI芯片"), ("INTC", "英特尔", "CPU/代工")],
+        "AMD": [("NVDA", "英伟达", "GPU"), ("INTC", "英特尔", "CPU")],
+        "AVGO": [("NVDA", "英伟达", "GPU"), ("MRVL", "Marvell", "数据中心芯片")],
+        # ── 消费电子 ──
+        "AAPL": [("MSFT", "Microsoft", "软件/云"), ("GOOGL", "Alphabet", "搜索/云"), ("SAMSUNG", "三星", "消费电子")],
+        # ── 新能源 ──
+        "TSLA": [("BYD", "比亚迪", "新能源车"), ("NIO", "蔚来", "新能源车"), ("XPEV", "小鹏", "新能源车")],
+        # ── 医药 ──
+        "NVO": [("LLY", "礼来", "GLP-1/减肥药"), ("MRK", "默沙东", "制药")],
+        "LLY": [("NVO", "诺和诺德", "GLP-1/减肥药")],
+        # ── 音乐/内容 ──
+        "TME": [("SPOT", "Spotify", "音乐流媒体"), ("9899.HK", "云音乐", "音乐流媒体")],
+        # ── 游戏 ──
+        "RBLX": [("U", "Unity", "游戏引擎"), ("EA", "EA", "游戏发行"), ("TTWO", "Take-Two", "游戏发行")],
+        "NTES": [("0700.HK", "腾讯", "游戏/社交"), ("EA", "EA", "游戏发行")],
+        # ── 网络安全/SaaS ──
+        "OKTA": [("CRWD", "CrowdStrike", "网络安全"), ("ZS", "Zscaler", "零信任"), ("PANW", "Palo Alto", "网络安全")],
+        # ── 社交 ──
+        "RDDT": [("META", "Meta", "社交/广告"), ("SNAP", "Snap", "社交"), ("PINS", "Pinterest", "图片社交")],
+        # ── 出行/旅游 ──
+        "TCOM": [("BKNG", "Booking", "在线旅游"), ("EXPE", "Expedia", "在线旅游")],
+        # ── 航天 ──
+        "RKLB": [("SPCE", "Virgin Galactic", "航天"), ("LUNR", "Intuitive Machines", "月球探测")],
+        # ── 金融 ──
+        "000001.SZ": [("600036.SH", "招商银行", "零售银行"), ("601318.SH", "中国平安", "综合金融")],
+        # ── 食品饮料 ──
+        "09698.HK": [("09633.HK", "农夫山泉", "饮料"), ("00322.HK", "康师傅", "食品饮料")],
+        # ── 医药CRO ──
+        "02272.HK": [("02359.HK", "药明康德", "CRO"), ("03759.HK", "康龙化成", "CRO")],
+        # ── 医疗设备 ──
+        "300760.SZ": [("688271.SH", "联影医疗", "医疗影像"), ("002223.SZ", "鱼跃医疗", "家用医疗")],
+        # ── 新能源/电力设备 ──
+        "300274.SZ": [("688390.SH", "固德威", "逆变器"), ("300763.SZ", "锦浪科技", "逆变器")],
+        # ── 电子/半导体(A股) ──
+        "300661.SZ": [("603501.SH", "韦尔股份", "CIS芯片"), ("688008.SH", "澜起科技", "内存接口")],
+        # ── 电力自动化 ──
+        "600406.SH": [("601126.SH", "四方股份", "电力自动化"), ("002121.SZ", "科陆电子", "智能电网")],
+        "601126.SH": [("600406.SH", "国电南瑞", "电力自动化")],
+        # ── 芯片/PCB ──
+        "688630.SH": [("002916.SZ", "深南电路", "PCB"), ("603228.SH", "景旺电子", "PCB")],
     }
 
     _PEER_FALLBACK: dict[str, list[tuple[str, str, str]]] = {
@@ -140,14 +214,8 @@ class ReportAnalyzer:
             peers = self._PEER_FALLBACK.get(market, [])[:2]
         if not peers:
             return []
-        # Import once outside peer loop
-        import os as _os
-        import sys as _sys
-        sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
-        _sys.path.insert(0, sdk_path)
-        _sys.path.insert(0, f"{sdk_path}/src")
-        from financial_sdk import FinancialFacade
-        facade = FinancialFacade()
+
+        from deep_report.westock_provider import fetch_finance_data
 
         def _latest(data_dict, field):
             if not data_dict or not isinstance(data_dict, dict):
@@ -159,26 +227,25 @@ class ReportAnalyzer:
                 return float(v) if v is not None else None
             return None
 
-        def _to_dict(obj):
-            if obj is None:
-                return {}
-            if hasattr(obj, 'to_dict'):
-                return obj.to_dict()
-            if hasattr(obj, '__call__'):
-                obj = obj()
-            if hasattr(obj, 'to_dict'):
-                return obj.to_dict()
-            return {}
-
         results = []
         for p_code, p_name, p_cat in peers:
             try:
-                bundle = facade.get_financial_data(p_code, report_type="all", period="annual")
-                if not bundle:
+                p_market = self._detect_market_for_peers(p_code)
+                data = fetch_finance_data(p_code, p_market, num_periods=1)
+                if not data:
                     continue
-                income = getattr(bundle, 'income_statement', None)
-                idict = _to_dict(income)
-                bdict = _to_dict(getattr(bundle, 'balance_sheet', None))
+                is_data = data.get("income_statement", {})
+                bs_data = data.get("balance_sheet", {})
+
+                # Convert to indexed format for _latest()
+                def _to_indexed(source: dict) -> dict:
+                    result = {}
+                    for field, pvals in source.items():
+                        result[field] = {str(i): v for i, (k, v) in enumerate(sorted(pvals.items()))}
+                    return result
+
+                idict = _to_indexed(is_data)
+                bdict = _to_indexed(bs_data)
                 results.append({
                     "code": p_code, "name": p_name, "category": p_cat,
                     "metrics": {
@@ -217,6 +284,34 @@ class ReportAnalyzer:
                   "| 公司 | 可比维度 | 营收 | 净利润 | 毛利润 |\n"
                   "|------|---------|------|--------|--------|\n")
         return header + "\n".join(rows) + "\n"
+
+    @staticmethod
+    def _format_tech_context(tech: dict) -> str:
+        """Format technical indicators as LLM context."""
+        if not tech:
+            return ""
+        lines = ["## 📈 技术指标（最新交易日）", ""]
+        # Try kdj variants
+        kdj_k = tech.get("kdj_KDJ_K") or tech.get("kdj_K")
+        kdj_d = tech.get("kdj_KDJ_D") or tech.get("kdj_D")
+        kdj_j = tech.get("kdj_KDJ_J") or tech.get("kdj_J")
+
+        for field, label in [
+            ("closePrice", "收盘价"),
+            ("ma_MA_5", "MA5"), ("ma_MA_20", "MA20"), ("ma_MA_60", "MA60"),
+            ("macd_DIF", "MACD DIF"), ("macd_DEA", "MACD DEA"),
+            ("rsi_RSI_6", "RSI(6)"), ("rsi_RSI_12", "RSI(12)"),
+        ]:
+            val = tech.get(field)
+            if val is not None:
+                lines.append(f"- {label}: {val:.2f}")
+
+        if kdj_k is not None:
+            lines.append(f"- KDJ: K={kdj_k:.2f} D={kdj_d:.2f} J={kdj_j:.2f}")
+
+        lines.append("")
+        lines.append("> 请在报告中引用以上实时技术指标，避免依赖 LLM 内置过期数据。")
+        return "\n".join(lines)
 
     @staticmethod
     def _period_sort_key(entry: dict) -> tuple[int, int]:
@@ -748,41 +843,46 @@ class ReportAnalyzer:
         }
 
     def _load_sdk_data(self, code: str) -> dict | None:
-        """Load financial-sdk data for a stock."""
+        """Load financial data via WeStock Data for cross-validation.
+
+        Returns format compatible with _get_sdk_field():
+            {source_name: {field_name: {period_index: value}}}
+        """
         try:
-            import os as _os
-            import sys as _sys
-            _sdk_path = _os.environ.get("FINANCIAL_SDK_PATH", "/root/code/financial-sdk")
-            _sys.path.insert(0, _sdk_path)
-            _sys.path.insert(0, f"{_sdk_path}/src")
-            from financial_sdk import FinancialFacade
-            f = FinancialFacade()
-            bundle = f.get_financial_data(code, report_type="all", period="annual")
-            if not bundle:
+            from deep_report.westock_provider import fetch_finance_data
+
+            # Infer market from code format
+            if code.endswith((".SH", ".SZ")):
+                market = "A"
+            elif code.endswith(".HK"):
+                market = "HK"
+            elif code.isalpha() or "." not in code:
+                market = "US"
+            else:
+                market = "A"
+
+            data = fetch_finance_data(code, market, num_periods=8)
+            if not data or not data.get("periods"):
                 return None
 
-            income = getattr(bundle, 'income_statement', None)
-            bs = getattr(bundle, 'balance_sheet', None)
-            cf = getattr(bundle, 'cash_flow', None)
-
-            def _to_dict(obj):
-                if obj is None:
+            # Convert period-date keys to integer indices (compatible with _get_sdk_field)
+            def _to_indexed(values: dict) -> dict:
+                if not values:
                     return {}
-                if hasattr(obj, 'to_dict'):
-                    return obj.to_dict()
-                if hasattr(obj, '__call__'):
-                    obj = obj()
-                if hasattr(obj, 'to_dict'):
-                    return obj.to_dict()
-                return {}
+                return {str(i): v for i, (k, v) in enumerate(sorted(values.items()))}
 
-            return {
-                "income_statement": _to_dict(income),
-                "balance_sheet": _to_dict(bs),
-                "cash_flow": _to_dict(cf),
-            }
+            result = {}
+            for source_name in ("income_statement", "balance_sheet", "cash_flow"):
+                source = data.get(source_name, {})
+                if source:
+                    indexed = {}
+                    for field_name, period_values in source.items():
+                        indexed[field_name] = _to_indexed(period_values)
+                    result[source_name] = indexed
+
+            return result if result else None
         except Exception as e:
-            logger.warning("Failed to load financial-sdk: %s", e)
+            logger.warning("Failed to load WeStock data: %s", e)
             return None
 
     @staticmethod
@@ -804,6 +904,13 @@ class ReportAnalyzer:
         "万元": 10_000,
         "百万元": 1_000_000, "millions": 1_000_000,
         "亿元": 100_000_000, "亿": 100_000_000,
+        # USD units (SEC filings use millions USD)
+        "百万美元": 1_000_000, "million usd": 1_000_000, "usd millions": 1_000_000,
+        "亿美元": 100_000_000, "billion usd": 100_000_000, "usd billions": 100_000_000,
+        # HK units (HKEX filings may use 千元)
+        "千港元": 1_000, "hkd thousands": 1_000,
+        "百万港元": 1_000_000, "hkd millions": 1_000_000,
+        "亿港元": 100_000_000, "hkd billions": 100_000_000,
     }
 
     @classmethod
@@ -839,6 +946,7 @@ class ReportAnalyzer:
 
         Prevents LLM arithmetic hallucination by providing ready-to-use
         formatted values (e.g. converts 7632.5百万元→76.3亿).
+        Detects currency from unit field and adds appropriate suffix (亿/亿美元/亿港元).
         """
         entry = kpis_list[-1] if kpis_list else {}
         refs = []
@@ -854,8 +962,16 @@ class ReportAnalyzer:
                 continue
             base = cls._UNIT_MULTIPLIER.get(unit, 1)
             yi = v * base / 100_000_000  # Convert to 亿 (100 million)
+
+            # Detect currency for proper suffix
+            currency_suffix = "亿"
+            if any(kw in unit for kw in ("美元", "usd", "dollar")):
+                currency_suffix = "亿美元"
+            elif any(kw in unit for kw in ("港元", "hkd")):
+                currency_suffix = "亿港元"
+
             if field in ("revenue", "net_profit", "gross_profit", "operating_profit", "total_assets", "total_equity"):
-                refs.append(f"- {field}（{kpi.get('label', field)}）: **{yi:.1f}亿** (原始: {v} {unit})")
+                refs.append(f"- {field}（{kpi.get('label', field)}）: **{yi:.1f}{currency_suffix}** (原始: {v} {unit})")
             elif field in ("gross_margin", "net_margin", "roe"):
                 refs.append(f"- {field}（{kpi.get('label', field)}）: **{v:.1f}%**")
             elif field in ("eps",):
@@ -868,7 +984,8 @@ class ReportAnalyzer:
     # ── LLM Pass 2: Cross-Period Analysis ──
 
     def _analyze_multi_period(self, kpis_list: list[dict], code: str, current_period: str,
-                               peer_text: str = "", credibility: str = "", risk_evolution: str = "") -> str | None:
+                               peer_text: str = "", credibility: str = "", risk_evolution: str = "",
+                               valuation_text: str = "", tech_text: str = "") -> str | None:
         """LLM 对多期 KPI 做趋势分析和叙事生成"""
         prompt = self._load_prompt("analyze.md")
         if not prompt:
@@ -885,6 +1002,10 @@ class ReportAnalyzer:
             extra_sections.append(risk_evolution)
         if peer_text:
             extra_sections.append(peer_text)
+        if valuation_text:
+            extra_sections.append(valuation_text)
+        if tech_text:
+            extra_sections.append(tech_text)
 
         # ── Anti-hallucination: pre-compute formatted reference values ──
         ref_card = self._build_ref_card(kpis_list)
@@ -973,12 +1094,12 @@ class ReportAnalyzer:
                 LLMProvider, call_with_fallback,
                 DEEPSEEK_ENDPOINT, DEEPSEEK_MODEL,
                 get_deepseek_api_key,
-                get_ark_api_key, LLM_ENDPOINT as ARK_ENDPOINT,
+                get_ark_api_key, ARKCODE_ENDPOINT,
             )
             providers = []
             try:
                 providers.append(LLMProvider(
-                    endpoint=DEEPSEEK_ENDPOINT, model=DEEPSEEK_MODEL,
+                    endpoint=ARKCODE_ENDPOINT, model="deepseek-v4-pro",
                     api_key=get_deepseek_api_key(), label="DeepSeek",
                 ))
             except Exception as e:
@@ -987,7 +1108,7 @@ class ReportAnalyzer:
                 ark_key = get_ark_api_key()
                 if ark_key:
                     providers.append(LLMProvider(
-                        endpoint=ARK_ENDPOINT, model="doubao-seed-2.0-pro",
+                        endpoint=ARKCODE_ENDPOINT, model="doubao-seed-2.0-pro",
                         api_key=ark_key, label="ARK",
                         extra={"thinking": {"type": "disabled"}},
                     ))
@@ -1008,7 +1129,7 @@ class ReportAnalyzer:
         try:
             import os as _os
             import sys as _sys
-            _mb_path = _os.environ.get("MORNING_BRIEF_PATH", "/root/code/morning-brief")
+            _mb_path = _os.environ.get("MORNING_BRIEF_PATH", str(MORNING_BRIEF_PATH))
             _sys.path.insert(0, _mb_path)
 
             from src.utils.config import (

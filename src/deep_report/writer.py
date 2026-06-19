@@ -1,18 +1,24 @@
-"""ReportWriter — 将分析结果输出为飞书文档"""
+"""ReportWriter — 将分析结果输出为 Markdown + IMA 笔记"""
 
 from __future__ import annotations
+import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 
 logger = logging.getLogger("deep_report.writer")
 
 
 class ReportWriter:
-    """报告输出器：生成飞书文档"""
+    """报告输出器：生成 Markdown + 发布到 IMA 笔记"""
+
+    def __init__(self, publish_ima: bool = True):
+        self.publish_ima = publish_ima
 
     def write(self, code: str, period: str, result: dict) -> str | None:
         """
-        生成报告文档
+        生成报告文档并发布
 
         Args:
             code: 股票代码
@@ -20,7 +26,7 @@ class ReportWriter:
             result: analyzer.analyze() 的输出 {kpis, trends, narrative, validation, _rejected}
 
         Returns:
-            文件路径（飞书上传由调用方 OpenClaw agent 处理）
+            文件路径
         """
         narrative = result.get("narrative", "")
         rejected = result.get("_rejected", False)
@@ -29,7 +35,6 @@ class ReportWriter:
         title = self._build_title(code, period, result)
 
         if rejected or not narrative:
-            # Build diagnostic-only output
             markdown = self._build_diagnostic(title, code, period, validation)
         else:
             markdown = self._build_markdown(title, code, period, narrative, validation)
@@ -42,12 +47,69 @@ class ReportWriter:
         md_path.write_text(markdown, encoding="utf-8")
         logger.info("Markdown saved to %s", md_path)
 
-        # Write marker file for feishu upload
-        marker = out_dir / f"{safe_name}.ready"
-        marker.write_text(str(md_path), encoding="utf-8")
-        logger.info("Marker written to %s", marker)
+        # Publish to IMA
+        if self.publish_ima and not rejected and narrative:
+            ima_note_id = self._publish_to_ima(title, markdown, code, period)
+            if ima_note_id:
+                logger.info("IMA note published: %s", ima_note_id)
 
         return str(md_path)
+
+    def _publish_to_ima(self, title: str, markdown: str, code: str, period: str) -> str | None:
+        """Publish report as IMA note via OpenAPI."""
+        try:
+            skill_dir = os.path.expanduser("~/.hermes/skills/ima-skills")
+            ima_api = os.path.join(skill_dir, "ima_api.cjs")
+
+            if not os.path.exists(ima_api):
+                logger.warning("IMA API script not found at %s", ima_api)
+                return None
+
+            # Load credentials
+            client_id_file = os.path.expanduser("~/.config/ima/client_id")
+            api_key_file = os.path.expanduser("~/.config/ima/api_key")
+
+            if not os.path.exists(client_id_file) or not os.path.exists(api_key_file):
+                logger.warning("IMA credentials not configured")
+                return None
+
+            client_id = Path(client_id_file).read_text().strip()
+            api_key = Path(api_key_file).read_text().strip()
+
+            # Build options
+            opts = json.dumps({"clientId": client_id, "apiKey": api_key})
+
+            # Build request body
+            body = json.dumps({
+                "content_format": 1,  # Markdown
+                "content": markdown,
+                "title": title,
+            })
+
+            # Call IMA API
+            result = subprocess.run(
+                ["node", ima_api, "openapi/note/v1/import_doc", body, opts],
+                capture_output=True, text=True, timeout=30,
+            )
+
+            if result.returncode != 0:
+                logger.warning("IMA API error: %s", result.stderr[:200])
+                return None
+
+            resp = json.loads(result.stdout)
+            if resp.get("code") != 0:
+                logger.warning("IMA API returned error: %s", resp.get("msg", "unknown"))
+                return None
+
+            note_id = resp.get("data", {}).get("note_id", "")
+            return note_id
+
+        except subprocess.TimeoutExpired:
+            logger.warning("IMA API timeout")
+            return None
+        except Exception as e:
+            logger.warning("IMA publish failed: %s", e)
+            return None
 
     def _build_title(self, code: str, period: str, result: dict) -> str:
         kpis = result.get("kpis", [])
@@ -75,7 +137,7 @@ class ReportWriter:
 
         return f"""# {title}
 
-> 📅 分析日期: {self._today()} | 📊 数据源: SEC EDGAR / HKEX / 交易所公告 | ⚙️ 引擎: deep-report v0.1
+> 📅 分析日期: {self._today()} | 📊 数据源: SEC EDGAR / HKEX / 交易所公告 | ⚙️ 引擎: deep-report v0.2
 
 {narrative}
 
@@ -94,7 +156,6 @@ class ReportWriter:
         checks = validation.get("checks", [])
         summary = validation.get("summary", {})
 
-        # Build comparison table
         rows = []
         for c in checks:
             llm_v = f"{c['llm_value']:,.0f}" if c['llm_value'] else "N/A"
@@ -107,7 +168,7 @@ class ReportWriter:
 
         return f"""# ⚠️ {title} — 数据校验未通过
 
-> 📅 分析日期: {self._today()} | ⚙️ 引擎: deep-report v0.1 | 🔴 状态: 校验拒绝
+> 📅 分析日期: {self._today()} | ⚙️ 引擎: deep-report v0.2 | 🔴 状态: 校验拒绝
 
 ## 校验摘要
 
