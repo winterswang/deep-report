@@ -1,0 +1,214 @@
+{
+  "stocks": [
+    {
+      "market": "A",
+      "stock_code": "600519.SH",
+      "stock_name": "贵州茅台"
+    },
+    {
+      "market": "A",
+      "stock_code": "000858.SZ",
+      "stock_name": "五粮液"
+    },
+    {
+      "market": "A",
+      "stock_code": "002304.SZ",
+      "stock_name": "洋河股份"
+    },
+    {
+      "market": "A",
+      "stock_code": "000568.SZ",
+      "stock_name": "泸州老窖"
+    },
+    {
+      "market": "HK",
+      "stock_code": "00700.HK",
+      "stock_name": "腾讯控股"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09988.HK",
+      "stock_name": "阿里巴巴"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09961.HK",
+      "stock_name": "携程集团"
+    },
+    {
+      "market": "HK",
+      "stock_code": "03690.HK",
+      "stock_name": "美团"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09888.HK",
+      "stock_name": "百度"
+    },
+    {
+      "market": "HK",
+      "stock_code": "01810.HK",
+      "stock_name": "小米集团"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09618.HK",
+      "stock_name": "京东集团"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09999.HK",
+      "stock_name": "网易"
+    },
+    {
+      "market": "HK",
+      "stock_code": "02015.HK",
+      "stock_name": "理想汽车"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09866.HK",
+      "stock_name": "蔚来"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09868.HK",
+      "stock_name": "小鹏汽车"
+    },
+    {
+      "market": "HK",
+      "stock_code": "02269.HK",
+      "stock_name": "药明生物"
+    },
+    {
+      "market": "HK",
+      "stock_code": "02359.HK",
+      "stock_name": "药明康德"
+    },
+    {
+      "market": "HK",
+      "stock_code": "06160.HK",
+      "stock_name": "百济神州"
+    },
+    {
+      "market": "HK",
+      "stock_code": "09626.HK",
+      "stock_name": "哔哩哔哩"
+    },
+    {
+      "market": "HK",
+      "stock_code": "01024.HK",
+      "stock_name": "快手"
+    },
+    {
+      "market": "US",
+      "stock_code": "MNSO",
+      "stock_name": "名创优品"
+    },
+    {
+      "market": "US",
+      "stock_code": "AAPL",
+      "stock_name": "苹果"
+    },
+    {
+      "market": "US",
+      "stock_code": "NVDA",
+      "stock_name": "英伟达"
+    },
+    {
+      "market": "US",
+      "stock_code": "MSFT",
+      "stock_name": "微软"
+    },
+    {
+      "market": "US",
+      "stock_code": "GOOGL",
+      "stock_name": "谷歌"
+    },
+    {
+      "market": "US",
+      "stock_code": "AMZN",
+      "stock_name": "亚马逊"
+    },
+    {
+      "market": "US",
+      "stock_code": "META",
+      "stock_name": "Meta"
+    },
+    {
+      "market": "US",
+      "stock_code": "TSLA",
+      "stock_name": "特斯拉"
+    },
+    {
+      "market": "US",
+      "stock_code": "PDD",
+      "stock_name": "拼多多"
+    },
+    {
+      "market": "US",
+      "stock_code": "BABA",
+      "stock_name": "阿里巴巴(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "BIDU",
+      "stock_name": "百度(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "JD",
+      "stock_name": "京东(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "NIO",
+      "stock_name": "蔚来(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "LI",
+      "stock_name": "理想汽车(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "XPEV",
+      "stock_name": "小鹏汽车(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "TCOM",
+      "stock_name": "携程(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "BILI",
+      "stock_name": "哔哩哔哩(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "BEKE",
+      "stock_name": "贝壳"
+    },
+    {
+      "market": "US",
+      "stock_code": "NTES",
+      "stock_name": "网易(US)"
+    },
+    {
+      "market": "US",
+      "stock_code": "VNET",
+      "stock_name": "世纪互联"
+    },
+    {
+      "market": "US",
+      "stock_code": "KC",
+      "stock_name": "金山云"
+    },
+    {
+      "market": "US",
+      "stock_code": "DADA",
+      "stock_name": "达达"
+    }
+  ]
+}

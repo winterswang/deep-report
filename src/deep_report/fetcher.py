@@ -10,8 +10,10 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger("deep_report.fetcher")
 
+from deep_report.config import UNIFIED_DOWNLOADER_DOWNLOADS
+
 # Downloads base dir (shared with unified-downloader)
-DOWNLOADS_BASE = Path("/root/code/unified-downloader/downloads")
+DOWNLOADS_BASE = UNIFIED_DOWNLOADER_DOWNLOADS
 
 # Market detection (simple heuristic, refine later)
 A_SH_RE = re.compile(r"^\d{6}\.(SZ|SH)$")
