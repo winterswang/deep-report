@@ -26,7 +26,7 @@ MORNING_BRIEF_PATH = Path(os.environ.get(
 
 UNIFIED_DOWNLOADER_DOWNLOADS = Path(os.environ.get(
     "UNIFIED_DOWNLOADER_DOWNLOADS",
-    "/root/code/unified-downloader/downloads"
+    str(PROJECT_ROOT.parent / "unified-downloader" / "downloads")
 ))
 
 # ── Output ──
