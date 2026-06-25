@@ -162,6 +162,11 @@ def main():
     save_state(state)
 
     logger.info("Done: %d triggered, %d failed", triggered, failed)
+
+    # Watchdog output — only print to stdout when there's something to report
+    if triggered > 0 or failed > 0:
+        print(f"📊 deep-report 季报触发完成: {triggered} 成功, {failed} 失败", flush=True)
+
     return 0 if failed == 0 else 1
 
 
