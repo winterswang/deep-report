@@ -142,22 +142,32 @@ def _call_openai_compatible(
     return None
 
 
-# Exports for backward compat with morning-brief config imports
-LLM_MODEL = DEEPSEEK_MODEL
-
 # ARK/doubao endpoints
 ARK_ENDPOINT = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
 ARKCODE_ENDPOINT = "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions"
-LLM_ENDPOINT = ARK_ENDPOINT
+
+# Auto-select endpoint based on environment
+if os.environ.get("ARK_CODING_PLAN", "").lower() in ("true", "1", "yes"):
+    LLM_ENDPOINT = ARKCODE_ENDPOINT
+    LLM_MODEL = "doubao-seed-2.0-pro"
+else:
+    LLM_ENDPOINT = ARK_ENDPOINT
+    LLM_MODEL = DEEPSEEK_MODEL
 
 
 def get_deepseek_api_key() -> str:
-    """Get DeepSeek API key from environment. Falls back to ARKCODE_API_KEY."""
-    key = os.environ.get("DEEPSEEK_API_KEY", "") or os.environ.get("ARKCODE_API_KEY", "")
+    """Get DeepSeek API key from environment.
+    Checks DEEPSEEK_API_KEY → ARKCODE_API_KEY → ARK_API_KEY.
+    """
+    key = (
+        os.environ.get("DEEPSEEK_API_KEY", "")
+        or os.environ.get("ARKCODE_API_KEY", "")
+        or os.environ.get("ARK_API_KEY", "")
+    )
     if not key:
         raise ValueError(
             "DEEPSEEK_API_KEY not set. "
-            "Set DEEPSEEK_API_KEY or ARKCODE_API_KEY env var."
+            "Set DEEPSEEK_API_KEY or ARKCODE_API_KEY or ARK_API_KEY env var."
         )
     return key
 
