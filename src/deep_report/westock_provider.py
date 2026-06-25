@@ -98,6 +98,44 @@ def to_westock_code(code: str, market: str) -> str:
 
 # ── 财务数据获取 ──
 
+# ── Margin/Ratio field extraction helpers ──
+
+_MARGIN_FIELD_MAP = {
+    # A股/HK/US 原始列名 → 标准字段名
+    "GrossMargin": "gross_margin",
+    "gross_margin": "gross_margin",
+    "毛利率": "gross_margin",
+    "NetMargin": "net_margin",
+    "net_margin": "net_margin",
+    "净利率": "net_margin",
+    "ROE": "roe",
+    "roe": "roe",
+    "净资产收益率": "roe",
+}
+
+
+def _extract_margin_metrics(row: dict) -> dict:
+    """从原始行数据中提取毛利率/净利率/ROE百分比指标。
+    不同市场的原始列名不同，这里统一尝试常见变体。"""
+    result = {}
+    # 市场特定的列名变体
+    candidates = {
+        "gross_margin": ["GrossMargin", "gross_margin", "毛利率"],
+        "net_margin": ["NetMargin", "net_margin", "净利率", "净利润率"],
+        "roe": ["ROE", "roe", "净资产收益率", "ROE(TTM)"],
+    }
+    for field, keys in candidates.items():
+        for key in keys:
+            val = row.get(key)
+            if val is not None:
+                try:
+                    result[field] = float(str(val).replace(",", "").replace("%", ""))
+                except (ValueError, TypeError):
+                    pass
+                break
+    return result
+
+
 # A股利润表字段映射
 FINANCE_FIELD_MAP = {
     "OperatingRevenue": "revenue",
@@ -216,6 +254,14 @@ def fetch_finance_data(code: str, market: str, num_periods: int = 4) -> dict:
                     if std_field not in result[target]:
                         result[target][std_field] = {}
                     result[target][std_field][period] = val
+
+            # 额外提取百分比指标（毛利率/净利率/ROE）
+            margins = _extract_margin_metrics(row)
+            for margin_field, val in margins.items():
+                margin_target = "balance_sheet" if margin_field == "roe" else "income_statement"
+                if margin_field not in result[margin_target]:
+                    result[margin_target][margin_field] = {}
+                result[margin_target][margin_field][period] = val
 
     # 排序期间
     result["periods"].sort()

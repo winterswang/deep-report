@@ -412,3 +412,66 @@ class TestValidate:
     def test_verify_enabled(self):
         a = ReportAnalyzer(verify=True)
         assert a.verify is True
+
+
+# ── Margin/Ratio field tests (added 2026-06-25) ──
+
+class TestSdkPercentageFields:
+    """验证毛利率/净利率/ROE百分比字段映射"""
+
+    def test_gross_margin_field_map(self, analyzer):
+        """毛利率必须存在于 _SDK_FIELD_MAP"""
+        assert "gross_margin" in analyzer._SDK_FIELD_MAP
+
+    def test_net_margin_field_map(self, analyzer):
+        """净利率必须存在于 _SDK_FIELD_MAP"""
+        assert "net_margin" in analyzer._SDK_FIELD_MAP
+
+    def test_roe_field_map(self, analyzer):
+        """ROE必须存在于 _SDK_FIELD_MAP"""
+        assert "roe" in analyzer._SDK_FIELD_MAP
+
+    def test_get_sdk_field_reads_percentage(self, analyzer):
+        """_get_sdk_field 能正确读取百分比字段"""
+        mock_data = {
+            "income_statement": {
+                "gross_margin": {"0": 80.58, "1": 78.2},
+                "net_margin": {"0": 53.35, "1": 50.1},
+            },
+            "balance_sheet": {
+                "roe": {"0": 21.1, "1": 19.5},
+            }
+        }
+        # 取最新 index (sorted keys → "1")
+        assert analyzer._get_sdk_field(mock_data, "gross_margin", "any") == 78.2
+        assert analyzer._get_sdk_field(mock_data, "net_margin", "any") == 50.1
+        assert analyzer._get_sdk_field(mock_data, "roe", "any") == 19.5
+
+    def test_validate_with_percentage_fields(self, analyzer, monkeypatch):
+        """交叉验证对百分比字段正常工作（偏差<20%为ok）"""
+        mock_data = {
+            "income_statement": {
+                "gross_margin": {"0": 80.58},
+                "net_margin": {"0": 53.35},
+            },
+            "balance_sheet": {
+                "roe": {"0": 21.1},
+            }
+        }
+        monkeypatch.setattr(analyzer, "_load_sdk_data", lambda code: mock_data)
+
+        kpis = [{
+            "_period": "0",
+            "kpis": [
+                {"field": "gross_margin", "value": 80.6, "unit": "%"},
+                {"field": "net_margin", "value": 53.3, "unit": "%"},
+                {"field": "roe", "value": 21.2, "unit": "%"},
+            ]
+        }]
+        result = analyzer._validate(kpis, "TEST")
+        assert result["status"] == "ok"
+        checks = {c["field"]: c for c in result["checks"]}
+        assert "gross_margin" in checks
+        assert checks["gross_margin"]["deviation_pct"] < 1.0
+        assert "net_margin" in checks
+        assert "roe" in checks

@@ -736,6 +736,10 @@ class ReportAnalyzer:
         "total_assets": ("balance_sheet", "total_assets"),
         "total_equity": ("balance_sheet", "total_equity"),
         "total_liabilities": ("balance_sheet", "total_liabilities"),
+        # Margin/ratio fields (percentages, no sign check needed)
+        "gross_margin": ("income_statement", "gross_margin"),
+        "net_margin": ("income_statement", "net_margin"),
+        "roe": ("balance_sheet", "roe"),
     }
 
     # Fields where sign matters (positive = healthy, negative = warning)
