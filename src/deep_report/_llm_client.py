@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import signal
 import socket
 import time
 import urllib.request
@@ -21,10 +20,6 @@ logger = logging.getLogger("deep_report.llm_client")
 
 class _TimeoutError(Exception):
     pass
-
-
-def _timeout_handler(signum, frame):
-    raise _TimeoutError("LLM request timeout")
 
 # Default DeepSeek endpoint (OpenAI-compatible)
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
@@ -126,9 +121,9 @@ def _call_openai_compatible(
 
     for attempt in range(3):
         try:
-            # Hard timeout via signal (Unix only)
-            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(timeout)
+            # Hard timeout via socket (thread-safe, works in all environments)
+            old_socket_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(timeout)
             try:
                 with urllib.request.urlopen(req, timeout=min(30, timeout)) as resp:
                     body = resp.read().decode("utf-8")
@@ -136,10 +131,9 @@ def _call_openai_compatible(
                     content = result["choices"][0]["message"]["content"]
                     return content
             finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
+                socket.setdefaulttimeout(old_socket_timeout)
 
-        except _TimeoutError:
+        except socket.timeout:
             logger.warning("  Request timeout after %ds", timeout)
             return None
         except urllib.error.HTTPError as e:
