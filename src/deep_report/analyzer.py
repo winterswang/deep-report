@@ -919,6 +919,8 @@ class ReportAnalyzer:
         "万元": 10_000,
         "百万元": 1_000_000, "millions": 1_000_000,
         "亿元": 100_000_000, "亿": 100_000_000,
+        # Already-normalized units from morning-brief deterministic extraction
+        "亿人民币": 100_000_000, "亿美元": 100_000_000, "亿港元": 100_000_000,
         # USD units (SEC filings use millions USD)
         "百万美元": 1_000_000, "million usd": 1_000_000, "usd millions": 1_000_000,
         "亿美元": 100_000_000, "billion usd": 100_000_000, "usd billions": 100_000_000,
