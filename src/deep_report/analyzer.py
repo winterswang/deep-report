@@ -56,12 +56,23 @@ class ReportAnalyzer:
 
         logger.info("Text extracted from %d reports", len(texts))
 
-        # Step 2: LLM KPI extraction (Pass 1 — per-report)
+        # Step 2: KPI extraction (Pass 1 — per-report)
         kpis_list = []
-        for t in texts:
-            kpi = self._extract_kpis(t["period"], t["text"], t["market"])
-            if kpi:
-                kpis_list.append(kpi)
+        
+        # Check if pre-extracted KPIs are available (from deterministic extraction)
+        if hasattr(self, '_pre_extracted_kpis') and self._pre_extracted_kpis:
+            logger.info("Using pre-extracted KPIs: %d fields", len(self._pre_extracted_kpis))
+            for t in texts:
+                kpis_list.append({
+                    "period": t["period"],
+                    "kpis": self._pre_extracted_kpis,
+                })
+        else:
+            # Fall back to LLM-based extraction
+            for t in texts:
+                kpi = self._extract_kpis(t["period"], t["text"], t["market"])
+                if kpi:
+                    kpis_list.append(kpi)
 
         if not kpis_list:
             logger.error("No KPIs extracted")
