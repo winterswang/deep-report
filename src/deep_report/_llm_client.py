@@ -10,11 +10,16 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import time
 import urllib.request
 import urllib.error
 
 logger = logging.getLogger("deep_report.llm_client")
+
+
+class _TimeoutError(Exception):
+    pass
 
 # Default DeepSeek endpoint (OpenAI-compatible)
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
@@ -91,7 +96,7 @@ def _call_openai_compatible(
     timeout: int = 120,
     extra: dict | None = None,
 ) -> str | None:
-    """Call an OpenAI-compatible chat completions endpoint."""
+    """Call an OpenAI-compatible chat completions endpoint with hard timeout."""
     payload = {
         "model": model,
         "messages": [
@@ -116,11 +121,21 @@ def _call_openai_compatible(
 
     for attempt in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                body = resp.read().decode("utf-8")
-                result = json.loads(body)
-                content = result["choices"][0]["message"]["content"]
-                return content
+            # Hard timeout via socket (thread-safe, works in all environments)
+            old_socket_timeout = socket.getdefaulttimeout()
+            socket.setdefaulttimeout(timeout)
+            try:
+                with urllib.request.urlopen(req, timeout=min(30, timeout)) as resp:
+                    body = resp.read().decode("utf-8")
+                    result = json.loads(body)
+                    content = result["choices"][0]["message"]["content"]
+                    return content
+            finally:
+                socket.setdefaulttimeout(old_socket_timeout)
+
+        except socket.timeout:
+            logger.warning("  Request timeout after %ds", timeout)
+            return None
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8") if e.fp else ""
             if e.code == 429:
