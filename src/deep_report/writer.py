@@ -121,7 +121,6 @@ class ReportWriter:
                     company_name = name
                     break
 
-        freq_label = "年报" if period.endswith("FY") else "季报"
         return f"{company_name} {period} 财报深度分析"
 
     def _build_markdown(

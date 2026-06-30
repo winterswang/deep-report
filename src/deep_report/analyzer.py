@@ -62,6 +62,11 @@ class ReportAnalyzer:
         # Check if pre-extracted KPIs are available (from deterministic extraction)
         if hasattr(self, '_pre_extracted_kpis') and self._pre_extracted_kpis:
             logger.info("Using pre-extracted KPIs: %d fields", len(self._pre_extracted_kpis))
+            # NOTE: current callers (morning-brief analysis_worker) pass a
+            # single-period report, so reusing the same KPI set per text is
+            # correct. If multi-period reports are ever passed with
+            # pre-extracted KPIs, this would assign identical KPIs to every
+            # period and distort trend analysis — match by period instead.
             for t in texts:
                 kpis_list.append({
                     "period": t["period"],
@@ -920,7 +925,8 @@ class ReportAnalyzer:
         "百万元": 1_000_000, "millions": 1_000_000,
         "亿元": 100_000_000, "亿": 100_000_000,
         # Already-normalized units from morning-brief deterministic extraction
-        "亿人民币": 100_000_000, "亿美元": 100_000_000, "亿港元": 100_000_000,
+        # (亿美元/亿港元 already defined in USD/HK blocks below)
+        "亿人民币": 100_000_000,
         # USD units (SEC filings use millions USD)
         "百万美元": 1_000_000, "million usd": 1_000_000, "usd millions": 1_000_000,
         "亿美元": 100_000_000, "billion usd": 100_000_000, "usd billions": 100_000_000,

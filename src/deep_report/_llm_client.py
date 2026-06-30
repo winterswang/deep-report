@@ -17,10 +17,6 @@ import urllib.error
 
 logger = logging.getLogger("deep_report.llm_client")
 
-
-class _TimeoutError(Exception):
-    pass
-
 # Default DeepSeek endpoint (OpenAI-compatible)
 DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -121,11 +117,14 @@ def _call_openai_compatible(
 
     for attempt in range(3):
         try:
-            # Hard timeout via socket (thread-safe, works in all environments)
+            # Hard timeout via socket (thread-safe, works in all environments).
+            # Note: urllib timeout is per-socket-operation (connect + each read),
+            # not total wall-clock. Use the full `timeout` so slow first-byte
+            # responses (large max_tokens) are not cut off prematurely.
             old_socket_timeout = socket.getdefaulttimeout()
             socket.setdefaulttimeout(timeout)
             try:
-                with urllib.request.urlopen(req, timeout=min(30, timeout)) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     body = resp.read().decode("utf-8")
                     result = json.loads(body)
                     content = result["choices"][0]["message"]["content"]
